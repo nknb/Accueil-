@@ -11,6 +11,13 @@ import os
 # Configuration des imports
 sys.path.append(str(Path(__file__).parent))
 
+# ===== IMPORTER LA FENÊTRE PRINCIPALE =====
+try:
+    from ui.main_window import MainWindow
+except ImportError:
+    print("⚠️ Module main_window non trouvé, création d'une fenêtre de test")
+    MainWindow = None
+
 # ===== PARTIE 1: VOTRE INTERFACE (INCHANGÉE) =====
 class Ui_Form(object):
     def setupUi(self, Form):
@@ -175,6 +182,7 @@ class LoginApp(QDialog):
         self.utilisateur = None
         self.tentatives = 0
         self.max_tentatives = 5
+        self.main_window = None  # Pour stocker la fenêtre principale
         
         # Utiliser VOTRE interface (inchangée)
         self.ui = Ui_Form()
@@ -364,8 +372,8 @@ class LoginApp(QDialog):
                     # Mettre à jour last_login
                     self.mettre_a_jour_last_login(user[0])
                     
-                    # Accepter la connexion
-                    QTimer.singleShot(1000, self.accepter_connexion)
+                    # Fermer la boîte de dialogue et ouvrir la fenêtre principale
+                    QTimer.singleShot(1000, self.ouvrir_fenetre_principale)
                 else:
                     # Mauvais mot de passe
                     self.tentatives += 1
@@ -422,9 +430,24 @@ class LoginApp(QDialog):
         except:
             pass  # Silencieux si erreur
     
-    def accepter_connexion(self):
-        """Accepte la connexion et ferme la boîte de dialogue"""
-        self.accept()
+    def ouvrir_fenetre_principale(self):
+        """Ouvre la fenêtre principale après connexion réussie"""
+        if MainWindow is not None:
+            # Créer et afficher la fenêtre principale
+            self.main_window = MainWindow()
+            self.main_window.set_current_user(self.utilisateur)
+            self.main_window.show()
+            
+            # Fermer la fenêtre de connexion
+            self.accept()
+        else:
+            # Fallback: afficher un message de test
+            msg = QMessageBox()
+            msg.setWindowTitle("Connexion réussie")
+            msg.setText(f"Bienvenue {self.utilisateur['username']} !\n\nRôle: {self.utilisateur['role_display']}")
+            msg.setIcon(QMessageBox.Icon.Information)
+            msg.exec()
+            self.accept()
     
     def get_role_display(self, role):
         """Retourne l'affichage du rôle"""
@@ -507,23 +530,8 @@ if __name__ == "__main__":
     login = LoginApp()
     
     if login.exec() == QDialog.DialogCode.Accepted:
-        # Connexion réussie
-        user = login.utilisateur
-        print(f"✅ Connecté: {user['username']} - {user['role_display']}")
-        
-        # ICI vous pouvez ouvrir votre fenêtre principale
-        # from votre_fenetre_principale import MainWindow
-        # main_window = MainWindow()
-        # main_window.set_user(user)
-        # main_window.show()
-        
-        # Pour test, on affiche juste un message
-        msg = QMessageBox()
-        msg.setWindowTitle("Connexion réussie")
-        msg.setText(f"Bienvenue {user['username']} !\n\nRôle: {user['role_display']}")
-        msg.setIcon(QMessageBox.Icon.Information)
-        msg.exec()
-        
+        # La connexion a réussi et la fenêtre principale est déjà ouverte
+        print("✅ Application démarrée avec succès!")
         sys.exit(app.exec())
     else:
         print("👋 Au revoir!")
