@@ -1,25 +1,42 @@
-# loginUi3.py
+# main.py
+"""Point d'entrée pour l'application CNPS Accueil"""
+
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtWidgets import QDialog, QMessageBox, QApplication
-from PyQt6.QtCore import QTimer, Qt
-import sys ,res
+from PyQt6.QtCore import QTimer, Qt, QFile, QTextStream, QIODevice
+import sys
 from pathlib import Path
 import sqlite3
 import hashlib
-import os
+from datetime import datetime
 
 # Configuration des imports
-sys.path.append(str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent))
+
+# Importer la configuration
+from config import AppConfig
+import res  # Resource file
 
 # ===== IMPORTER LA FENÊTRE PRINCIPALE =====
 try:
-    from ui.main_window import MainWindow
-except ImportError:
-    print("⚠️ Module main_window non trouvé, création d'une fenêtre de test")
+    from sidebar.main_windows import MainWindow
+    print("✅ Fenêtre sidebar/main_windows.py importée avec succès")
+    print(f"📦 Type de MainWindow: {type(MainWindow)}")
+except ImportError as e:
+    print(f"❌ Erreur d'importation: {e}")
+    print("📁 Vérifiez que le chemin sidebar/main_windows.py existe")
     MainWindow = None
 
-# ===== PARTIE 1: VOTRE INTERFACE (INCHANGÉE) =====
+# ===== PARTIE 1: INTERFACE DE CONNEXION =====
 class Ui_Form(object):
+    """Interface de connexion générée par Qt Designer
+    
+    Cette classe définit l'UI pour l'écran de connexion avec:
+    - Champs de saisie pour identifiant et mot de passe
+    - Bouton de connexion
+    - Logo et branding CNPS
+    """
+    
     def setupUi(self, Form):
         Form.setObjectName("Form")
         Form.resize(625, 565)
@@ -154,96 +171,87 @@ class Ui_Form(object):
         self.label_8.setText(_translate("Form", "Bienvenue dans l’application de gestion de l’accueil de la Caisse Nationale de Prévoyance Sociale.\n"
 ""))
 
-
-# ===== PARTIE 2: FONCTIONS DE HASHAGE SHA256 =====
-def hash_sha256(mot_de_passe):
-    """
-    Hash un mot de passe avec SHA256 et retourne le hash en hexadécimal
+# ===== PARTIE 2: FONCTIONS DE HASHAGE =====
+def hash_sha256(mot_de_passe: str) -> str:
+    """Hash un mot de passe en SHA256
+    
+    Args:
+        mot_de_passe: Le mot de passe à hasher
+        
+    Returns:
+        str: Le hash SHA256 du mot de passe
     """
     return hashlib.sha256(mot_de_passe.encode('utf-8')).hexdigest()
 
-def verifier_mot_de_passe(mot_de_passe_entre, hash_stocke):
-    """
-    Vérifie si le mot de passe correspond au hash stocké
-    """
-    # Hasher le mot de passe entré
-    hash_calcule = hash_sha256(mot_de_passe_entre)
-    
-    # Comparaison sécurisée
-    return hash_calcule == hash_stocke
 
+def verifier_mot_de_passe(mot_de_passe_entre: str, hash_stocke: str) -> bool:
+    """Vérifie qu'un mot de passe correspond à son hash
+    
+    Args:
+        mot_de_passe_entre: Le mot de passe entré par l'utilisateur
+        hash_stocke: Le hash stocké en base de données
+        
+    Returns:
+        bool: True si le mot de passe correspond, False sinon
+    """
+    hash_calcule = hash_sha256(mot_de_passe_entre)
+    return hash_calcule == hash_stocke
 
 # ===== PARTIE 3: LOGIQUE DE CONNEXION =====
 class LoginApp(QDialog):
-    """Application de connexion avec votre interface"""
+    """Fenêtre de connexion à l'application CNPS Accueil
+    
+    Gère:
+    - Affichage de l'interface de connexion
+    - Vérification des identifiants en base de données
+    - SHA256 des mots de passe
+    - Limitation du nombre de tentatives (5 max)
+    - Création des utilisateurs par défaut
+    - Transition vers la fenêtre principale
+    
+    Attributs:
+        utilisateur: Dict contenant les infos de l'utilisateur connecté
+        tentatives: Nombre de tentatives de connexion échouées
+        max_tentatives: Nombre max de tentatives (AppConfig.MAX_LOGIN_ATTEMPTS)
+        db_path: Chemin vers la base de données SQLite
+        main_window: Référence à la fenêtre principale
+    """
     
     def __init__(self):
         super().__init__()
         self.utilisateur = None
         self.tentatives = 0
-        self.max_tentatives = 5
-        self.main_window = None  # Pour stocker la fenêtre principale
+        self.max_tentatives = AppConfig.MAX_LOGIN_ATTEMPTS
+        self.main_window = None
         
-        # Utiliser VOTRE interface (inchangée)
         self.ui = Ui_Form()
         self.ui.setupUi(self)
-        
-        # Titre de la fenêtre
         self.setWindowTitle("Connexion - CNPS Accueil")
         
-        # Connecter le bouton de connexion
         self.ui.pushButton.clicked.connect(self.se_connecter)
-        
-        # Connexion avec la touche Entrée
         self.ui.lineEdit.returnPressed.connect(self.se_connecter)
         self.ui.lineEdit_2.returnPressed.connect(self.se_connecter)
         
-        # Label pour les messages (superposé à votre interface)
+        # Labels de message
         self.message_label = QtWidgets.QLabel(self.ui.widget)
         self.message_label.setGeometry(QtCore.QRect(295, 260, 190, 30))
         self.message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.message_label.setVisible(False)
         
-        # Label pour les tentatives
         self.tentative_label = QtWidgets.QLabel(self.ui.widget)
         self.tentative_label.setGeometry(QtCore.QRect(295, 340, 190, 30))
         self.tentative_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.tentative_label.setVisible(False)
         
-        # Trouver la base de données
-        self.db_path = self.trouver_db()
-        
-        # Créer la table si elle n'existe pas
+        self.db_path = AppConfig.get_db_path()
         self.creer_table()
-        
-        # Créer des utilisateurs par défaut avec hash si nécessaire
         self.creer_utilisateurs_defaut()
-        
-        # Focus sur l'identifiant
         self.ui.lineEdit.setFocus()
     
-    def trouver_db(self):
-        """Trouve le chemin de la base de données"""
-        chemins = [
-            "db.sqlite3",
-            "../db.sqlite3",
-            Path(__file__).parent / "db.sqlite3"
-        ]
-        
-        for chemin in chemins:
-            if Path(chemin).exists():
-                print(f"✅ Base trouvée: {chemin}")
-                return str(chemin)
-        
-        print("⚠️ Base non trouvée, création d'une nouvelle base")
-        return str(Path(__file__).parent / "db.sqlite3")
-    
     def creer_table(self):
-        """Crée la table auth_user si elle n'existe pas"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS auth_user (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -258,61 +266,49 @@ class LoginApp(QDialog):
                     role VARCHAR(20) DEFAULT 'preaccueil'
                 )
             """)
-            
             conn.commit()
             conn.close()
             print("✅ Table auth_user créée/vérifiée")
-            
         except Exception as e:
             print(f"❌ Erreur création table: {e}")
     
     def creer_utilisateurs_defaut(self):
-        """Crée des utilisateurs par défaut avec hash SHA256 si la table est vide"""
+        """Crée les utilisateurs par défaut s'ils n'existent pas"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(str(self.db_path))
             cursor = conn.cursor()
-            
-            # Vérifier s'il y a des utilisateurs
             cursor.execute("SELECT COUNT(*) FROM auth_user")
             count = cursor.fetchone()[0]
             
             if count == 0:
-                from datetime import datetime
-                
-                # Utilisateurs par défaut avec mots de passe hashés
-                utilisateurs = [
-                    ('admin', hash_sha256('admin123'), 'admin@cnps.ci', 1, 1, 1, 'admin'),
-                    ('manager', hash_sha256('manager123'), 'manager@cnps.ci', 1, 0, 1, 'manager'),
-                    ('accueil', hash_sha256('accueil123'), 'accueil@cnps.ci', 1, 0, 0, 'accueil'),
-                    ('preaccueil', hash_sha256('preaccueil123'), 'preaccueil@cnps.ci', 1, 0, 0, 'preaccueil'),
-                ]
-                
-                for username, password_hash, email, is_active, is_super, is_staff, role in utilisateurs:
+                for user in AppConfig.DEFAULT_USERS:
+                    password_hash = hash_sha256(user['password'])
                     cursor.execute("""
                         INSERT INTO auth_user 
                         (username, password, email, is_active, is_superuser, is_staff, date_joined, role)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (username, password_hash, email, is_active, is_super, is_staff, 
-                          datetime.now().isoformat(), role))
-                
+                    """, (
+                        user['username'],
+                        password_hash,
+                        user['email'],
+                        1,  # is_active
+                        1 if user['role'] == 'admin' else 0,  # is_superuser
+                        1 if user['role'] in ['admin', 'manager'] else 0,  # is_staff
+                        datetime.now().isoformat(),
+                        user['role']
+                    ))
                 conn.commit()
-                print("✅ Utilisateurs par défaut créés avec hash SHA256")
-            
+                print("✅ Utilisateurs par défaut créés")
             conn.close()
-            
         except Exception as e:
             print(f"❌ Erreur création utilisateurs: {e}")
     
     def se_connecter(self):
-        """Vérifie les identifiants"""
-        # Vérifier le verrouillage
+        """Déclenche la vérification de connexion"""
         if self.tentatives >= self.max_tentatives:
             self.afficher_message("⛔ Compte verrouillé (5 min)", "#dc3545")
-            self.tentative_label.setText("⏰ Réessayez dans 5 minutes")
-            self.tentative_label.setStyleSheet("color: #ffc107; font-size: 10px;")
-            self.tentative_label.setVisible(True)
             self.ui.pushButton.setEnabled(False)
-            QTimer.singleShot(300000, self.deverrouiller)  # 5 minutes
+            QTimer.singleShot(AppConfig.LOCKOUT_DURATION, self.deverrouiller)
             return
         
         identifiant = self.ui.lineEdit.text().strip()
@@ -322,145 +318,157 @@ class LoginApp(QDialog):
             self.afficher_message("❌ Identifiants requis", "#dc3545")
             return
         
-        # Désactiver le bouton
         self.ui.pushButton.setEnabled(False)
         self.ui.pushButton.setText("Vérification...")
-        
-        # Vérifier en arrière-plan
         QTimer.singleShot(100, lambda: self.verifier_db(identifiant, mot_de_passe))
     
-    def verifier_db(self, identifiant, mot_de_passe):
-        """Vérifie dans la base de données avec hash SHA256"""
+    def verifier_db(self, identifiant: str, mot_de_passe: str):
+        """Vérifie les identifiants en base de données
+        
+        Args:
+            identifiant: Le nom d'utilisateur
+            mot_de_passe: Le mot de passe
+        """
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(str(self.db_path))
             cursor = conn.cursor()
-            
-            # Chercher l'utilisateur
             cursor.execute("""
                 SELECT id, username, password, email, role, is_superuser 
                 FROM auth_user 
                 WHERE username = ? AND is_active = 1
             """, (identifiant,))
-            
             user = cursor.fetchone()
             conn.close()
             
             if user:
-                # Récupérer le hash stocké
-                hash_stocke = user[2]
-                
-                # Vérifier le mot de passe avec la fonction de hash
-                if verifier_mot_de_passe(mot_de_passe, hash_stocke):
-                    # Succès - Mot de passe correct
+                if verifier_mot_de_passe(mot_de_passe, user[2]):
                     self.utilisateur = {
                         'id': user[0],
                         'username': user[1],
                         'email': user[3],
                         'role': user[4] or ('admin' if user[5] else 'accueil'),
                     }
-                    
-                    # Ajouter l'affichage du rôle
                     self.utilisateur['role_display'] = self.get_role_display(self.utilisateur['role'])
                     
-                    # Succès
                     print(f"✅ Connexion réussie: {identifiant} ({self.utilisateur['role']})")
                     self.tentatives = 0
-                    
-                    # Afficher message de succès
                     self.afficher_message("✅ Connexion réussie!", "#28a745")
-                    
-                    # Mettre à jour last_login
                     self.mettre_a_jour_last_login(user[0])
                     
-                    # Fermer la boîte de dialogue et ouvrir la fenêtre principale
-                    QTimer.singleShot(1000, self.ouvrir_fenetre_principale)
+                    # Ouvrir la fenêtre principale
+                    print("🔍 Tentative d'ouverture de la fenêtre principale...")
+                    self.ouvrir_fenetre_principale()
                 else:
-                    # Mauvais mot de passe
                     self.tentatives += 1
                     reste = self.max_tentatives - self.tentatives
-                    
                     self.afficher_message(f"❌ Mot de passe incorrect", "#dc3545")
                     if reste > 0:
                         self.tentative_label.setText(f"⚠️ Tentatives restantes: {reste}")
-                        self.tentative_label.setStyleSheet("color: #ffc107; font-size: 10px;")
                         self.tentative_label.setVisible(True)
-                    
                     self.ui.lineEdit_2.clear()
                     self.ui.lineEdit_2.setFocus()
-                    
-                    print(f"❌ Échec connexion pour {identifiant} - Tentative {self.tentatives}/{self.max_tentatives}")
             else:
-                # Utilisateur non trouvé
                 self.tentatives += 1
                 reste = self.max_tentatives - self.tentatives
-                
                 self.afficher_message(f"❌ Utilisateur inconnu", "#dc3545")
                 if reste > 0:
                     self.tentative_label.setText(f"⚠️ Tentatives restantes: {reste}")
-                    self.tentative_label.setStyleSheet("color: #ffc107; font-size: 10px;")
                     self.tentative_label.setVisible(True)
-                
                 self.ui.lineEdit_2.clear()
                 self.ui.lineEdit_2.setFocus()
-                
-                print(f"❌ Utilisateur '{identifiant}' non trouvé")
                 
         except Exception as e:
             self.afficher_message(f"❌ Erreur: {str(e)}", "#dc3545")
             print(f"❌ Erreur base de données: {e}")
-        
         finally:
-            # Réactiver le bouton
             self.ui.pushButton.setEnabled(True)
             self.ui.pushButton.setText("Connexion")
     
-    def mettre_a_jour_last_login(self, user_id):
-        """Met à jour la date de dernière connexion"""
+    def mettre_a_jour_last_login(self, user_id: int):
+        """Met à jour la date de dernière connexion
+        
+        Args:
+            user_id: ID de l'utilisateur
+        """
         try:
-            from datetime import datetime
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(str(self.db_path))
             cursor = conn.cursor()
-            cursor.execute("""
-                UPDATE auth_user 
-                SET last_login = ? 
-                WHERE id = ?
-            """, (datetime.now().isoformat(), user_id))
+            cursor.execute("UPDATE auth_user SET last_login = ? WHERE id = ?", 
+                         (datetime.now().isoformat(), user_id))
             conn.commit()
             conn.close()
         except:
-            pass  # Silencieux si erreur
+            pass
     
     def ouvrir_fenetre_principale(self):
         """Ouvre la fenêtre principale après connexion réussie"""
-        if MainWindow is not None:
-            # Créer et afficher la fenêtre principale
+        print("🔍 ÉTAPE 1: Début de ouvrir_fenetre_principale")
+        
+        if MainWindow is None:
+            print("❌ MainWindow est None - import échoué")
+            QMessageBox.critical(self, "Erreur", "Impossible de charger la fenêtre principale")
+            return
+        
+        print("🔍 ÉTAPE 2: MainWindow OK")
+        
+        try:
+            # Créer la fenêtre
             self.main_window = MainWindow()
-            self.main_window.set_current_user(self.utilisateur)
+            print("🔍 ÉTAPE 3: Fenêtre créée avec succès")
+            
+            # ⚠️ IMPORTANT: Stocker la référence dans QApplication pour éviter garbage collection
+            QApplication.instance().main_window = self.main_window
+            print("🔍 ÉTAPE 3bis: Fenêtre stockée dans QApplication")
+            
+            # Transmettre l'utilisateur
+            if hasattr(self.main_window, 'set_current_user'):
+                print("🔍 ÉTAPE 4: Appel de set_current_user")
+                self.main_window.set_current_user(self.utilisateur)
+            else:
+                print("⚠️ set_current_user non trouvé")
+            
+            # Afficher la fenêtre
+            print("🔍 ÉTAPE 5: Appel de show()")
             self.main_window.show()
             
-            # Fermer la fenêtre de connexion
-            self.accept()
-        else:
-            # Fallback: afficher un message de test
-            msg = QMessageBox()
-            msg.setWindowTitle("Connexion réussie")
-            msg.setText(f"Bienvenue {self.utilisateur['username']} !\n\nRôle: {self.utilisateur['role_display']}")
-            msg.setIcon(QMessageBox.Icon.Information)
-            msg.exec()
-            self.accept()
+            # Forcer l'affichage
+            self.main_window.raise_()
+            self.main_window.activateWindow()
+            
+            print("🔍 ÉTAPE 6: show() exécuté")
+            
+            # Petit délai pour s'assurer que la fenêtre est affichée
+            QTimer.singleShot(100, self.fermer_login)
+            print("🔍 ÉTAPE 7: Fermeture de la fenêtre de connexion prévue")
+            
+        except Exception as e:
+            print(f"❌ Erreur lors de l'ouverture: {e}")
+            import traceback
+            traceback.print_exc()
     
-    def get_role_display(self, role):
-        """Retourne l'affichage du rôle"""
-        roles = {
-            'admin': '👑 Administrateur',
-            'manager': '📊 Manager',
-            'accueil': '🏢 Agent Accueil',
-            'preaccueil': '🛂 Agent Pré-accueil'
-        }
-        return roles.get(role, role)
+    def fermer_login(self):
+        """Ferme la fenêtre de connexion après un délai"""
+        print("🔍 Fermeture de la fenêtre de connexion")
+        self.accept()
     
-    def afficher_message(self, texte, couleur):
-        """Affiche un message temporaire"""
+    def get_role_display(self, role: str) -> str:
+        """Retourne le libellé d'affichage du rôle
+        
+        Args:
+            role: Code du rôle
+            
+        Returns:
+            str: Libellé avec emoji
+        """
+        return AppConfig.ROLES.get(role, {}).get('display', role)
+    
+    def afficher_message(self, texte: str, couleur: str):
+        """Affiche un message temporaire
+        
+        Args:
+            texte: Le texte à afficher
+            couleur: La couleur de fond (hex)
+        """
         self.message_label.setText(texte)
         self.message_label.setStyleSheet(f"""
             QLabel {{
@@ -476,14 +484,18 @@ class LoginApp(QDialog):
         QTimer.singleShot(3000, lambda: self.message_label.setVisible(False))
     
     def deverrouiller(self):
-        """Déverrouille après 5 minutes"""
+        """Déverrouille le compte après la durée de lockout"""
         self.tentatives = 0
         self.ui.pushButton.setEnabled(True)
         self.tentative_label.setVisible(False)
         self.afficher_message("✅ Compte déverrouillé", "#28a745")
     
     def keyPressEvent(self, event):
-        """Gère les touches"""
+        """Gère les touches spéciales
+        
+        Args:
+            event: L'événement de touche
+        """
         if event.key() == Qt.Key.Key_Escape:
             sys.exit(0)
         elif event.key() == Qt.Key.Key_F1:
@@ -492,17 +504,15 @@ class LoginApp(QDialog):
             super().keyPressEvent(event)
     
     def afficher_aide(self):
-        """Affiche l'aide"""
+        """Affiche l'aide en ligne"""
         aide = """
         <h2>🔐 Aide à la connexion</h2>
-        
         <h3>📝 Comment se connecter :</h3>
         <ul>
             <li>Entrez votre <b>identifiant</b></li>
             <li>Entrez votre <b>mot de passe</b></li>
             <li>Cliquez sur <b>Connexion</b> ou appuyez sur <b>Entrée</b></li>
         </ul>
-        
         <h3>👥 Comptes de test :</h3>
         <ul>
             <li><b>admin</b> / admin123 - 👑 Administrateur</li>
@@ -510,28 +520,39 @@ class LoginApp(QDialog):
             <li><b>accueil</b> / accueil123 - 🏢 Agent Accueil</li>
             <li><b>preaccueil</b> / preaccueil123 - 🛂 Agent Pré-accueil</li>
         </ul>
-        
-        <h3>⌨️ Raccourcis :</h3>
-        <ul>
-            <li><b>Entrée</b> : Valider</li>
-            <li><b>Échap</b> : Quitter</li>
-            <li><b>F1</b> : Cette aide</li>
-        </ul>
         """
-        
         QMessageBox.information(self, "Aide - Connexion", aide)
 
 
 # ===== PARTIE 4: PROGRAMME PRINCIPAL =====
 if __name__ == "__main__":
+    print("🚀 Démarrage de l'application...")
     app = QApplication(sys.argv)
     
-    # Créer et afficher la fenêtre de connexion
+    # Charger les styles depuis le fichier QSS
+    style_path = AppConfig.get_style_path()
+    if style_path:
+        try:
+            style_file = QFile(str(style_path))
+            style_file.open(QIODevice.OpenModeFlag.ReadOnly | QIODevice.OpenModeFlag.Text)
+            style_stream = QTextStream(style_file)
+            app.setStyleSheet(style_stream.readAll())
+            style_file.close()
+            print(f"✅ Style chargé depuis: {style_path}")
+        except Exception as e:
+            print(f"⚠️ Erreur lors du chargement du style: {e}")
+    else:
+        print("⚠️ Fichier de style non trouvé, style par défaut utilisé")
+    
+    print("🔍 Création de la fenêtre de connexion...")
     login = LoginApp()
     
-    if login.exec() == QDialog.DialogCode.Accepted:
-        # La connexion a réussi et la fenêtre principale est déjà ouverte
-        print("✅ Application démarrée avec succès!")
+    print("🔍 Exécution de la fenêtre de connexion...")
+    result = login.exec()
+    print(f"🔍 Résultat de connexion: {result}")
+    
+    if result == QDialog.DialogCode.Accepted:
+        print("✅ Connexion acceptée, lancement de la boucle principale")
         sys.exit(app.exec())
     else:
         print("👋 Au revoir!")

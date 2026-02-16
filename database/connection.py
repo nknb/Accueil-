@@ -5,47 +5,44 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
+# Importer la configuration centralisée
+from config import AppConfig
+
+
 class DatabaseConnection:
     """Gestionnaire de connexion SQLite optimisé"""
     
     def __init__(self, db_path: str = None):
-        # Chercher la base de données
+        """Initialise la connexion à la base de données
+        
+        Args:
+            db_path: Chemin personnalisé vers la BD (optionnel)
+        """
         if db_path is None:
-            # Chemins possibles
-            possible_paths = [
-                "db.sqlite3",
-                "../db.sqlite3",
-                "../../db.sqlite3",
-                "/Users/blanchard/Desktop/Applications Accueil/db.sqlite3",
-                Path(__file__).parent.parent / "db.sqlite3"
-            ]
-            
-            for path in possible_paths:
-                path_obj = Path(path)
-                if path_obj.exists():
-                    self.db_path = path_obj
-                    print(f"✅ Base de données trouvée: {self.db_path}")
-                    break
-            else:
-                # Si aucune base trouvée, utiliser le chemin par défaut
-                self.db_path = Path("db.sqlite3")
-                print(f"⚠️ Aucune base trouvée, création: {self.db_path}")
+            self.db_path = AppConfig.get_db_path()
         else:
             self.db_path = Path(db_path)
     
     @contextmanager
     def get_connection(self):
-        """Fournit une connexion avec gestion de contexte"""
+        """Fournit une connexion SQLite avec gestion de contexte
+        
+        Yields:
+            sqlite3.Connection: Connexion à la base de données
+        """
         conn = None
         try:
             conn = sqlite3.connect(
                 str(self.db_path),
                 detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-                timeout=30
+                timeout=AppConfig.DB_TIMEOUT
             )
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA foreign_keys = ON")
-            conn.execute("PRAGMA journal_mode = WAL")
+            
+            if AppConfig.DB_FOREIGN_KEYS:
+                conn.execute("PRAGMA foreign_keys = ON")
+            if AppConfig.DB_WAL_MODE:
+                conn.execute("PRAGMA journal_mode = WAL")
             
             yield conn
             conn.commit()
