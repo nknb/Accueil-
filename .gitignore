@@ -47,6 +47,9 @@ env/
 *.sqlite3
 *.db
 
+# Local portable build tests
+dist_portable_test/
+
 # Pytest
 .pytest_cache/
 .coverage
