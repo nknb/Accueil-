@@ -3,12 +3,27 @@
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtWidgets import QDialog, QMessageBox, QApplication
-from PyQt6.QtCore import QTimer, Qt, QFile, QTextStream, QIODevice
+from PyQt6.QtCore import QTimer, Qt, QFile, QTextStream, QIODevice, QSettings
 import sys
 from pathlib import Path
 import sqlite3
 import hashlib
+import warnings
+import os
 from datetime import datetime
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"sipPyTypeDict\(\) is deprecated.*",
+    category=DeprecationWarning,
+)
 
 # Configuration des imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -22,9 +37,11 @@ try:
     from sidebar.main_windows import MainWindow
     print("✅ Fenêtre sidebar/main_windows.py importée avec succès")
     print(f"📦 Type de MainWindow: {type(MainWindow)}")
-except ImportError as e:
+except Exception as e:
     print(f"❌ Erreur d'importation: {e}")
-    print("📁 Vérifiez que le chemin sidebar/main_windows.py existe")
+    print(f"📁 Traceback complet:")
+    import traceback
+    traceback.print_exc()
     MainWindow = None
 
 # ===== PARTIE 1: INTERFACE DE CONNEXION =====
@@ -98,7 +115,7 @@ class Ui_Form(object):
         self.label_4 = QtWidgets.QLabel(parent=self.widget)
         self.label_4.setGeometry(QtCore.QRect(320, 80, 131, 40))
         font = QtGui.QFont()
-        font.setPointSize(20)
+        font.setPointSize(14)
         font.setBold(True)
         self.label_4.setFont(font)
         self.label_4.setStyleSheet("color: rgb(0, 85, 164);")
@@ -197,6 +214,26 @@ def verifier_mot_de_passe(mot_de_passe_entre: str, hash_stocke: str) -> bool:
     hash_calcule = hash_sha256(mot_de_passe_entre)
     return hash_calcule == hash_stocke
 
+
+def log_runtime_db_path(db_path: Path):
+    """Journalise le chemin DB réellement utilisé au démarrage."""
+    try:
+        if getattr(sys, "frozen", False):
+            runtime_dir = Path(sys.executable).resolve().parent
+        else:
+            runtime_dir = Path(__file__).resolve().parent
+
+        logs_dir = runtime_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        log_file = logs_dir / "runtime_db_path.log"
+
+        now = datetime.now().isoformat(timespec="seconds")
+        line = f"{now} | pid={os.getpid()} | db_path={db_path}\n"
+        with log_file.open("a", encoding="utf-8") as fp:
+            fp.write(line)
+    except Exception:
+        pass
+
 # ===== PARTIE 3: LOGIQUE DE CONNEXION =====
 class LoginApp(QDialog):
     """Fenêtre de connexion à l'application CNPS Accueil
@@ -223,6 +260,7 @@ class LoginApp(QDialog):
         self.tentatives = 0
         self.max_tentatives = AppConfig.MAX_LOGIN_ATTEMPTS
         self.main_window = None
+        self.settings = QSettings("CNPS", "AccueilApp")
         
         self.ui = Ui_Form()
         self.ui.setupUi(self)
@@ -246,11 +284,41 @@ class LoginApp(QDialog):
         self.db_path = AppConfig.get_db_path()
         self.creer_table()
         self.creer_utilisateurs_defaut()
+        self.charger_dernieres_identifiants()
         self.ui.lineEdit.setFocus()
+
+    def _open_db_connection(self) -> sqlite3.Connection:
+        """Ouvre une connexion SQLite avec pragmas adaptés au multi-accès."""
+        conn = sqlite3.connect(str(self.db_path), timeout=AppConfig.DB_TIMEOUT)
+        pragmas = AppConfig.get_sqlite_pragmas(self.db_path)
+        conn.execute(f"PRAGMA journal_mode = {pragmas['journal_mode']}")
+        conn.execute(f"PRAGMA busy_timeout = {pragmas['busy_timeout_ms']}")
+        conn.execute(f"PRAGMA foreign_keys = {pragmas['foreign_keys']}")
+        conn.execute(f"PRAGMA synchronous = {pragmas['synchronous']}")
+        return conn
+
+    def charger_dernieres_identifiants(self):
+        """Charge les derniers identifiants valides depuis le stockage local."""
+        last_username = self.settings.value("auth/last_username", "", type=str)
+        last_password = self.settings.value("auth/last_password", "", type=str)
+
+        if last_username:
+            self.ui.lineEdit.setText(last_username)
+        if last_password:
+            self.ui.lineEdit_2.setText(last_password)
+
+        if last_username or last_password:
+            print("✅ Derniers identifiants chargés")
+
+    def sauvegarder_dernieres_identifiants(self, username: str, password: str):
+        """Sauvegarde les derniers identifiants valides."""
+        self.settings.setValue("auth/last_username", username)
+        self.settings.setValue("auth/last_password", password)
+        self.settings.sync()
     
     def creer_table(self):
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._open_db_connection()
             cursor = conn.cursor()
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS auth_user (
@@ -275,7 +343,7 @@ class LoginApp(QDialog):
     def creer_utilisateurs_defaut(self):
         """Crée les utilisateurs par défaut s'ils n'existent pas"""
         try:
-            conn = sqlite3.connect(str(self.db_path))
+            conn = self._open_db_connection()
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM auth_user")
             count = cursor.fetchone()[0]
@@ -330,7 +398,7 @@ class LoginApp(QDialog):
             mot_de_passe: Le mot de passe
         """
         try:
-            conn = sqlite3.connect(str(self.db_path))
+            conn = self._open_db_connection()
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT id, username, password, email, role, is_superuser 
@@ -353,6 +421,7 @@ class LoginApp(QDialog):
                     print(f"✅ Connexion réussie: {identifiant} ({self.utilisateur['role']})")
                     self.tentatives = 0
                     self.afficher_message("✅ Connexion réussie!", "#28a745")
+                    self.sauvegarder_dernieres_identifiants(identifiant, mot_de_passe)
                     self.mettre_a_jour_last_login(user[0])
                     
                     # Ouvrir la fenêtre principale
@@ -391,13 +460,13 @@ class LoginApp(QDialog):
             user_id: ID de l'utilisateur
         """
         try:
-            conn = sqlite3.connect(str(self.db_path))
+            conn = self._open_db_connection()
             cursor = conn.cursor()
             cursor.execute("UPDATE auth_user SET last_login = ? WHERE id = ?", 
                          (datetime.now().isoformat(), user_id))
             conn.commit()
             conn.close()
-        except:
+        except Exception:
             pass
     
     def ouvrir_fenetre_principale(self):
@@ -528,6 +597,24 @@ class LoginApp(QDialog):
 if __name__ == "__main__":
     print("🚀 Démarrage de l'application...")
     app = QApplication(sys.argv)
+
+    resolved_db_path = AppConfig.get_db_path()
+    print(f"[DB] Chemin utilisé: {resolved_db_path}")
+    log_runtime_db_path(resolved_db_path)
+
+    # Forcer un thème clair (désactive tout effet de mode nuit système)
+    app.setStyle("Fusion")
+    light_palette = QtGui.QPalette()
+    light_palette.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor("#ffffff"))
+    light_palette.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor("#000000"))
+    light_palette.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor("#ffffff"))
+    light_palette.setColor(QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor("#f5f5f5"))
+    light_palette.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor("#000000"))
+    light_palette.setColor(QtGui.QPalette.ColorRole.Button, QtGui.QColor("#ffffff"))
+    light_palette.setColor(QtGui.QPalette.ColorRole.ButtonText, QtGui.QColor("#000000"))
+    light_palette.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor("#2a82da"))
+    light_palette.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor("#ffffff"))
+    app.setPalette(light_palette)
     
     # Charger les styles depuis le fichier QSS
     style_path = AppConfig.get_style_path()

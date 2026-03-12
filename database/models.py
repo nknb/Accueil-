@@ -303,13 +303,21 @@ class DemandeAccueil:
         
         if isinstance(self.heure_arrivee, str) and self.heure_arrivee:
             try:
-                self.heure_arrivee = datetime.strptime(self.heure_arrivee, "%H:%M:%S").time()
+                value = self.heure_arrivee
+                if "T" in value or " " in value:
+                    self.heure_arrivee = datetime.fromisoformat(value.replace('Z', '+00:00')).time()
+                else:
+                    self.heure_arrivee = datetime.strptime(value[:8], "%H:%M:%S").time()
             except ValueError:
-                self.heure_arrivee = datetime.now().time()
-                
+                self.heure_arrivee = None
+
         if isinstance(self.heure_reception, str) and self.heure_reception:
             try:
-                self.heure_reception = datetime.strptime(self.heure_reception, "%H:%M:%S").time()
+                value = self.heure_reception
+                if "T" in value or " " in value:
+                    self.heure_reception = datetime.fromisoformat(value.replace('Z', '+00:00')).time()
+                else:
+                    self.heure_reception = datetime.strptime(value[:8], "%H:%M:%S").time()
             except ValueError:
                 self.heure_reception = None
                 
@@ -332,8 +340,6 @@ class DemandeAccueil:
                 self.traite_le = None
         
         # Initialiser les valeurs par défaut si None
-        if self.id is None:
-            self.id = str(uuid.uuid4())
         if self.date is None:
             self.date = date.today()
         if self.heure_arrivee is None:
@@ -342,6 +348,32 @@ class DemandeAccueil:
             self.created_at = datetime.now()
         if self.updated_at is None:
             self.updated_at = datetime.now()
+
+    @staticmethod
+    def _get_next_numeric_id(min_base: int = 943) -> str:
+        """Retourne le prochain ID numérique de demande, avec un plancher minimal."""
+        try:
+            result = db.execute_query("SELECT MAX(CAST(id AS INTEGER)) AS max_id FROM accueil_demandeaccueil")
+            max_id = result[0].get("max_id") if result else None
+            max_id = int(max_id) if max_id is not None else min_base
+            return str(max(max_id, min_base) + 1)
+        except Exception:
+            return str(min_base + 1)
+
+    @staticmethod
+    def _compute_delai_objectif_from_wait_time(wait_time: Optional[str]) -> int:
+        """Retourne 1 si temps_attente < 15 minutes, sinon 0."""
+        if not wait_time:
+            return 0
+        try:
+            parts = str(wait_time).strip().split(":")
+            if len(parts) != 3:
+                return 0
+            hours, minutes, seconds = map(int, parts)
+            total_seconds = (hours * 3600) + (minutes * 60) + seconds
+            return 1 if total_seconds < 900 else 0
+        except (TypeError, ValueError):
+            return 0
     
     @property
     def service(self) -> Optional[Service]:
@@ -394,13 +426,29 @@ class DemandeAccueil:
     def save(self) -> bool:
         """Sauvegarde la demande en base"""
         try:
+            # ID numérique séquentiel pour les nouvelles insertions
+            existing = []
+            if self.id is not None:
+                existing = db.execute_query(
+                    "SELECT id FROM accueil_demandeaccueil WHERE id = ?",
+                    (self.id,)
+                )
+
+            if not existing and (self.id is None or not str(self.id).isdigit()):
+                self.id = self._get_next_numeric_id()
+
             # Préparer les dates pour la sauvegarde
             date_str = self.date.isoformat() if hasattr(self.date, 'isoformat') else str(self.date)
             heure_arrivee_str = self.heure_arrivee.isoformat() if hasattr(self.heure_arrivee, 'isoformat') else self.heure_arrivee
             heure_reception_str = self.heure_reception.isoformat() if hasattr(self.heure_reception, 'isoformat') else self.heure_reception
             created_at_str = self.created_at.isoformat() if hasattr(self.created_at, 'isoformat') else self.created_at
+            if not created_at_str:
+                created_at_str = datetime.now().isoformat()
             updated_at_str = datetime.now().isoformat()
             traite_le_str = self.traite_le.isoformat() if self.traite_le and hasattr(self.traite_le, 'isoformat') else self.traite_le
+
+            # Synchronisation automatique avec la règle métier: < 15 min => objectif atteint
+            self.delai_objectif = self._compute_delai_objectif_from_wait_time(self.temps_attente)
             
             data = {
                 'id': self.id,
@@ -424,12 +472,6 @@ class DemandeAccueil:
                 'traite_le': traite_le_str,
                 'updated_at': updated_at_str
             }
-            
-            # Vérifier si la demande existe
-            existing = db.execute_query(
-                "SELECT id FROM accueil_demandeaccueil WHERE id = ?",
-                (self.id,)
-            )
             
             if existing:
                 # Mise à jour
@@ -530,7 +572,7 @@ class DemandeAccueil:
                 if reception >= arrivee:
                     delta = reception - arrivee
                     self.temps_attente = str(delta)
-                    self.delai_objectif = 1 if delta.total_seconds() > 900 else 0
+                    self.delai_objectif = self._compute_delai_objectif_from_wait_time(self.temps_attente)
             except Exception as e:
                 print(f"Erreur lors du calcul du temps d'attente: {e}")
 
@@ -666,7 +708,7 @@ class Utilisateur:
         try:
             role = Role(self.role)
             return Permission.has_permission(role, permission)
-        except:
+        except Exception:
             return False
     
     def has_role(self, role_name: str) -> bool:
@@ -678,7 +720,7 @@ class Utilisateur:
         """Affichage du rôle"""
         try:
             return str(Role(self.role))
-        except:
+        except Exception:
             return self.role
     
     @property

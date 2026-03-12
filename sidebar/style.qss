@@ -1,5 +1,6 @@
 /*= Style for mainwindow START
   ==================================================== */
+
 	#MainWindow {
 		background-color: #fff;
 	}
@@ -34,7 +35,7 @@
 	}
 
     /* style for QPushButton and QLabel */
-	#icon_only_widget QPushButton, QLabel {
+	#icon_only_widget QPushButton, #icon_only_widget QLabel {
 		height:50px;
 		border:none;
 		/* border-bottom: 1px solid #b0b0b0; */

@@ -1,0 +1,21 @@
+# requirements.txt
+# Dépendances du projet CNPS Accueil
+
+# Interface graphique
+PyQt6==6.7.1
+PyQt6-Charts==6.7.0
+
+# Base de données
+# sqlite3 est inclus dans la bibliothèque standard Python
+
+# Sécurité - Hachage des mots de passe
+bcrypt==5.0.0
+
+# Traitement de données
+pandas>=1.5,<3.0
+
+# Configuration
+python-dotenv==1.0.0
+
+# Utilitaires
+pathlib2==2.3.0 ; python_version < '3.4'

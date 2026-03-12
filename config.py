@@ -3,6 +3,8 @@
 
 from pathlib import Path
 from typing import Optional
+import os
+import sys
 
 
 class AppConfig:
@@ -11,10 +13,28 @@ class AppConfig:
     # Chemins de base
     APP_ROOT = Path(__file__).parent
     DB_PATHS = [
-        APP_ROOT / "db.sqlite3",  # Chemin principal
-        APP_ROOT.parent / "db.sqlite3",  # Un niveau au-dessus
-        Path.cwd() / "db.sqlite3",  # Répertoire courant
+        APP_ROOT / "db.sqlite3",  # Base UNIQUE de l'application (même dossier que main.py)
     ]
+
+    DB_ENV_VAR = "CNPS_DB_PATH"
+
+    @classmethod
+    def _runtime_dir(cls) -> Path:
+        """Retourne le dossier runtime de l'application (source ou exe)."""
+        if getattr(sys, "frozen", False):
+            return Path(sys.executable).resolve().parent
+        return cls.APP_ROOT
+
+    @staticmethod
+    def _is_writable_dir(path: Path) -> bool:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            probe = path / ".cnps_write_test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            return True
+        except Exception:
+            return False
 
     @classmethod
     def get_db_path(cls) -> Path:
@@ -23,15 +43,60 @@ class AppConfig:
         Returns:
             Path: Chemin vers la base de données
         """
-        for db_path in cls.DB_PATHS:
+        runtime_db = cls._runtime_dir() / "db.sqlite3"
+
+        # Mode exécutable: base strictement locale au dossier de l'application
+        # (portable: la donnée suit le dossier dist lors d'une copie sur un autre poste).
+        if getattr(sys, "frozen", False):
+            if runtime_db.exists():
+                print(f"[OK] Base exécutable trouvée: {runtime_db}")
+            else:
+                print(f"[WARN] Aucune base exécutable, utilisation: {runtime_db}")
+            return runtime_db
+
+        env_db_path = os.getenv(cls.DB_ENV_VAR, "").strip().strip('"').strip("'")
+        if env_db_path:
+            candidate = Path(env_db_path).expanduser()
+            if candidate.exists():
+                print(f"[OK] Base de données (env {cls.DB_ENV_VAR}) trouvée: {candidate}")
+                return candidate
+            print(f"[WARN] Chemin env {cls.DB_ENV_VAR} introuvable: {candidate}")
+
+        user_db = Path(os.getenv("LOCALAPPDATA", str(cls.APP_ROOT))) / "CNPSAccueil" / "db.sqlite3"
+
+        for db_path in [runtime_db, *cls.DB_PATHS, user_db]:
             if db_path.exists():
-                print(f"✅ Base de données trouvée: {db_path}")
+                print(f"[OK] Base de données trouvée: {db_path}")
                 return db_path
 
-        # Si aucune base n'existe, utiliser le chemin par défaut
-        default_path = cls.DB_PATHS[0]
-        print(f"⚠️ Aucune base trouvée, utilisation: {default_path}")
+        # Si aucune base n'existe, choisir un emplacement writable
+        runtime_dir = cls._runtime_dir()
+        if cls._is_writable_dir(runtime_dir):
+            default_path = runtime_db
+        else:
+            user_dir = user_db.parent
+            user_dir.mkdir(parents=True, exist_ok=True)
+            default_path = user_db
+
+        print(f"[WARN] Aucune base trouvée, utilisation: {default_path}")
         return default_path
+
+    @staticmethod
+    def get_sqlite_pragmas(db_path: Path) -> dict:
+        """Retourne les PRAGMA SQLite adaptés au type de stockage.
+
+        - Dossier local: WAL pour de meilleures performances.
+        - Partage réseau UNC: DELETE pour éviter les problèmes de WAL sur SMB.
+        """
+        db_str = str(db_path)
+        is_unc_path = db_str.startswith("\\\\")
+
+        return {
+            "journal_mode": "DELETE" if is_unc_path else "WAL",
+            "busy_timeout_ms": int(AppConfig.DB_TIMEOUT * 1000),
+            "foreign_keys": "ON",
+            "synchronous": "NORMAL",
+        }
 
     @classmethod
     def get_style_path(cls) -> Optional[Path]:
@@ -42,9 +107,9 @@ class AppConfig:
         """
         style_path = cls.APP_ROOT / "sidebar" / "style.qss"
         if style_path.exists():
-            print(f"✅ Style trouvé: {style_path}")
+            print(f"[OK] Style trouvé: {style_path}")
             return style_path
-        print(f"⚠️ Style non trouvé: {style_path}")
+        print(f"[WARN] Style non trouvé: {style_path}")
         return None
 
     @classmethod
@@ -75,6 +140,17 @@ class AppConfig:
     MIN_WINDOW_WIDTH = 1400
     MIN_WINDOW_HEIGHT = 800
     REFRESH_INTERVAL = 60000  # en millisecondes
+    AUTO_REFRESH_INTERVAL_MS = 5000  # refresh discret des pages principales
+    DASHBOARD_KPI_REFRESH_INTERVAL_MS = 30000
+    PREACCUEIL_CLOCK_INTERVAL_MS = 1000
+    DASHBOARD_DEFAULT_PERIOD_DAYS = 30
+    ACCUEIL_CACHE_TTL_SEC = 8
+    PREACCUEIL_CACHE_TTL_SEC = 8
+    DATABASE_CACHE_TTL_SEC = 12
+    DASHBOARD_CACHE_TTL_SEC = 15
+    ACCUEIL_DAILY_LIST_LIMIT = 20
+    DASHBOARD_TOP_ITEMS_LIMIT = 5
+    DASHBOARD_SLA_TOP_LIMIT = 3
 
     # Rôles utilisateur
     ROLES = {
