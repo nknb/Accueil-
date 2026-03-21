@@ -5,9 +5,9 @@ Cette fenêtre utilise Ui_MainWindow générée par Qt Designer et ajoute
 la logique métier pour la gestion des demandes d'accueil.
 """
 
-import sys 
-from PyQt6.QtWidgets import QMainWindow, QApplication, QPushButton
-from PyQt6.QtCore import pyqtSlot, QFile, QTextStream
+import sys
+from PyQt6.QtWidgets import QMainWindow, QApplication, QPushButton, QWidget
+from PyQt6.QtCore import pyqtSlot, QFile, QTextStream, Qt, QPoint
 from PyQt6.QtCore import QIODevice
 from pathlib import Path
 
@@ -30,44 +30,38 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super(MainWindow, self).__init__()
 
+        # Fenêtre sans barre de titre native
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        self._drag_pos = QPoint()
+
         # Permissions par défaut avant connexion (évite erreurs pendant l'init UI)
         self.allowed_views = {'accueil', 'dashboard', 'preaccueil', 'database', 'users'}
 
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
 
-        # Ajouter les pages widget au stackedWidget
-        self.accueil_page = AccueilPage()
-        self.dashboard_page = DashboardPage()
-        self.preaccueil_page = PreAccueilPage()
-        self.database_page = DatabasePage()
-        self.users_page = UsersPage()
-        
-        # Remplacer les pages par défaut
-        # Index 0: Accueil
-        if self.ui.stackedWidget.count() > 0:
+        # Boutons de contrôle fenêtre dans la barre de header
+        self._add_window_controls()
+
+        # Lazy loading : pages créées à la première navigation
+        _VIEW_NAMES = ['accueil', 'dashboard', 'preaccueil', 'database', 'users']
+        self._page_factories = {
+            'accueil':    AccueilPage,
+            'dashboard':  DashboardPage,
+            'preaccueil': PreAccueilPage,
+            'database':   DatabasePage,
+            'users':      UsersPage,
+        }
+        self._page_cache: dict = {}
+
+        # Vider les placeholders du designer et insérer des QWidget légers
+        while self.ui.stackedWidget.count() > 0:
             self.ui.stackedWidget.removeWidget(self.ui.stackedWidget.widget(0))
-        self.ui.stackedWidget.insertWidget(0, self.accueil_page)
-        
-        # Index 1: Dashboard
-        if self.ui.stackedWidget.count() > 1:
-            self.ui.stackedWidget.removeWidget(self.ui.stackedWidget.widget(1))
-        self.ui.stackedWidget.insertWidget(1, self.dashboard_page)
-        
-        # Index 2: Pré-accueil
-        if self.ui.stackedWidget.count() > 2:
-            self.ui.stackedWidget.removeWidget(self.ui.stackedWidget.widget(2))
-        self.ui.stackedWidget.insertWidget(2, self.preaccueil_page)
-        
-        # Index 3: Base de données
-        if self.ui.stackedWidget.count() > 3:
-            self.ui.stackedWidget.removeWidget(self.ui.stackedWidget.widget(3))
-        self.ui.stackedWidget.insertWidget(3, self.database_page)
-        
-        # Index 4: Utilisateurs
-        if self.ui.stackedWidget.count() > 4:
-            self.ui.stackedWidget.removeWidget(self.ui.stackedWidget.widget(4))
-        self.ui.stackedWidget.insertWidget(4, self.users_page)
+        for _ in _VIEW_NAMES:
+            self.ui.stackedWidget.addWidget(QWidget())
+
+        # Créer la page Accueil immédiatement (vue par défaut + set_current_user)
+        self._create_page('accueil')
         
         # Connecter les signaux des boutons de menu
         self.ui.home_btn_1.toggled.connect(self.on_home_btn_1_toggled)
@@ -96,6 +90,81 @@ class MainWindow(QMainWindow):
         self.current_user = None
         
         app_logger.info("Fenêtre principale initialisée avec tous les widgets")
+
+    # ── Lazy loading des pages ────────────────────────────────────────────────
+
+    _VIEW_NAMES = ['accueil', 'dashboard', 'preaccueil', 'database', 'users']
+
+    def _create_page(self, name: str) -> None:
+        """Crée la page `name` si elle n'existe pas encore et remplace le placeholder."""
+        if name in self._page_cache:
+            return
+        page = self._page_factories[name]()
+        self._page_cache[name] = page
+        idx = self._VIEW_NAMES.index(name)
+        old = self.ui.stackedWidget.widget(idx)
+        self.ui.stackedWidget.removeWidget(old)
+        old.deleteLater()
+        self.ui.stackedWidget.insertWidget(idx, page)
+
+    @property
+    def accueil_page(self):    return self._page_cache.get('accueil')
+    @property
+    def dashboard_page(self):  return self._page_cache.get('dashboard')
+    @property
+    def preaccueil_page(self): return self._page_cache.get('preaccueil')
+    @property
+    def database_page(self):   return self._page_cache.get('database')
+    @property
+    def users_page(self):      return self._page_cache.get('users')
+
+    def _add_window_controls(self):
+        """Ajoute les boutons Réduire / Agrandir / Fermer dans la barre de header."""
+        header = self.ui.widget  # barre du haut (change_btn + user_btn)
+
+        _BTN = (
+            ("─", "#f59e0b", "#d97706", "#b45309", self.showMinimized),   # Réduire
+            ("□", "#22c55e", "#16a34a", "#15803d", self._toggle_maximize), # Agrandir
+            ("✕", "#ef4444", "#dc2626", "#b91c1c", self.close),            # Fermer
+        )
+
+        for symbol, bg, hover, pressed, slot in _BTN:
+            btn = QPushButton(symbol, header)
+            btn.setFixedSize(22, 22)
+            btn.setStyleSheet(
+                f"QPushButton {{ background:{bg}; color:white; border-radius:11px;"
+                f"  font-size:11px; font-weight:700; border:none; }}"
+                f"QPushButton:hover {{ background:{hover}; }}"
+                f"QPushButton:pressed {{ background:{pressed}; }}"
+            )
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(slot)
+            self.ui.horizontalLayout_4.addWidget(btn)
+
+    def _toggle_maximize(self):
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+    # ── Déplacement fenêtre sans barre de titre ───────────────────────────────
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, event):
+        if (event.buttons() == Qt.MouseButton.LeftButton
+                and not self._drag_pos.isNull()
+                and not self.isMaximized()):
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = QPoint()
+
+    def mouseDoubleClickEvent(self, event):
+        """Double-clic sur la barre de header → agrandir/restaurer."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._toggle_maximize()
 
     def _apply_role_permissions(self, role: str):
         """Applique les permissions d'interface selon le rôle."""
@@ -142,6 +211,7 @@ class MainWindow(QMainWindow):
             app_logger.warning(f"Accès refusé à la vue '{view_name}' pour rôle {self.current_user.get('role') if self.current_user else 'inconnu'}")
             return
 
+        self._create_page(view_name)
         self.ui.stackedWidget.setCurrentIndex(view_index_map[view_name])
 
     def _get_fallback_allowed_index(self) -> int:
@@ -192,8 +262,6 @@ class MainWindow(QMainWindow):
             app_logger.error(f"Erreur rollover quotidien des statuts: {e}")
         app_logger.info(f"Utilisateur connecté: {user['username']} - {user['role_display']}")
         print(f"✅ Utilisateur connecté à sidebar: {user['username']} - {user['role_display']}")
-        self.setWindowTitle(f"CNPS Accueil - {user['role_display']}")
-        
         role = user['role']
         self._apply_role_permissions(role)
 

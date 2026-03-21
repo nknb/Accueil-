@@ -16,7 +16,7 @@ try:
 except ImportError:
     _BCRYPT_OK = False
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QWidget,
@@ -186,6 +186,11 @@ class _UsersTab(QWidget):
         super().__init__(parent)
         self._users: list[dict] = []
         self._build_ui()
+        # Debounce : évite un aller-retour BD à chaque frappe
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(250)
+        self._search_timer.timeout.connect(self._apply_filter)
         self._refresh_table()
 
     def _build_ui(self) -> None:
@@ -235,7 +240,7 @@ class _UsersTab(QWidget):
         self.search_edit = QLineEdit(self)
         self.search_edit.setPlaceholderText("\U0001f50d  Rechercher un utilisateur\u2026")
         self.search_edit.setStyleSheet(_INPUT_STYLE)
-        self.search_edit.textChanged.connect(self._refresh_table)
+        self.search_edit.textChanged.connect(lambda: self._search_timer.start())
         top_bar.addWidget(self.search_edit, 3)
 
         self.role_filter = QComboBox(self)
@@ -245,7 +250,7 @@ class _UsersTab(QWidget):
         self.role_filter.addItem("Managers", "manager")
         self.role_filter.addItem("Agents accueil", "accueil")
         self.role_filter.addItem("Pr\u00e9-accueil", "preaccueil")
-        self.role_filter.currentIndexChanged.connect(self._refresh_table)
+        self.role_filter.currentIndexChanged.connect(self._apply_filter)
         top_bar.addWidget(self.role_filter, 1)
 
         self.add_btn = QPushButton("\uff0b  Ajouter")
@@ -330,7 +335,12 @@ class _UsersTab(QWidget):
         return result
 
     def _refresh_table(self) -> None:
+        """Recharge depuis la BD puis applique le filtre. Appeler après add/edit/delete."""
         self._load_users()
+        self._apply_filter()
+
+    def _apply_filter(self) -> None:
+        """Filtre en mémoire et re-rendu — pas d'accès BD. Appelé sur chaque frappe/filtre."""
         filtered = self._filtered_users()
 
         # Stats en-tête
