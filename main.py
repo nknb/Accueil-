@@ -12,6 +12,13 @@ import warnings
 import os
 from datetime import datetime
 
+# Bcrypt disponible via utils/password_manager
+try:
+    from utils.password_manager import PasswordManager as _PM
+    _BCRYPT_AVAILABLE = True
+except ImportError:
+    _BCRYPT_AVAILABLE = False
+
 if hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -56,9 +63,14 @@ class Ui_Form(object):
     
     def setupUi(self, Form):
         Form.setObjectName("Form")
-        Form.resize(625, 565)
+        Form.resize(580, 520)
+        Form.setStyleSheet(
+            "QDialog { border: none; outline: none; }"
+            "QLineEdit { outline: none; }"
+            "QLineEdit:focus { outline: none; }"
+        )
         self.widget = QtWidgets.QWidget(parent=Form)
-        self.widget.setGeometry(QtCore.QRect(30, 30, 550, 500))
+        self.widget.setGeometry(QtCore.QRect(8, 8, 564, 504))
         self.widget.setStyleSheet("QPushButton#pushButton{\n"
 "    background-color: qlineargradient(spread:pad, x1:0, y1:0.505682, x2:1, y2:0.477, stop:0 rgba(11, 131, 120, 219), stop:1 rgba(85, 98, 112, 226));\n"
 "    color:rgba(255, 255, 255, 210);\n"
@@ -127,6 +139,7 @@ class Ui_Form(object):
         self.lineEdit.setFont(font)
         self.lineEdit.setStyleSheet("background-color:rgba(0, 0, 0, 0);\n"
 "border:none;\n"
+"outline:none;\n"
 "border-bottom:2px solid rgba(46, 82, 101, 200);\n"
 "color:rgba(0, 0, 0, 240);\n"
 "padding-bottom:7px;")
@@ -138,6 +151,7 @@ class Ui_Form(object):
         self.lineEdit_2.setFont(font)
         self.lineEdit_2.setStyleSheet("background-color:rgba(0, 0, 0, 0);\n"
 "border:none;\n"
+"outline:none;\n"
 "border-bottom:2px solid rgba(46, 82, 101, 200);\n"
 "color:rgba(0, 0, 0, 240);\n"
 "padding-bottom:7px;")
@@ -189,30 +203,58 @@ class Ui_Form(object):
 ""))
 
 # ===== PARTIE 2: FONCTIONS DE HASHAGE =====
-def hash_sha256(mot_de_passe: str) -> str:
-    """Hash un mot de passe en SHA256
-    
-    Args:
-        mot_de_passe: Le mot de passe à hasher
-        
+
+def _sha256_hex(mot_de_passe: str) -> str:
+    """Hash SHA256 brut (usage interne migration uniquement)."""
+    return hashlib.sha256(mot_de_passe.encode("utf-8")).hexdigest()
+
+
+def _is_sha256_hash(h: str) -> bool:
+    """Détecte si un hash est au format SHA256 legacy (64 caractères hex)."""
+    return len(h) == 64 and all(c in "0123456789abcdef" for c in h.lower())
+
+
+def hash_password(mot_de_passe: str) -> str:
+    """Hash un mot de passe. Utilise bcrypt si disponible, sinon SHA256.
+
     Returns:
-        str: Le hash SHA256 du mot de passe
+        str: Le hash du mot de passe (bcrypt ou SHA256 hex)
     """
-    return hashlib.sha256(mot_de_passe.encode('utf-8')).hexdigest()
+    if _BCRYPT_AVAILABLE:
+        return _PM.hash_password(mot_de_passe)
+    return _sha256_hex(mot_de_passe)
 
 
 def verifier_mot_de_passe(mot_de_passe_entre: str, hash_stocke: str) -> bool:
-    """Vérifie qu'un mot de passe correspond à son hash
-    
-    Args:
-        mot_de_passe_entre: Le mot de passe entré par l'utilisateur
-        hash_stocke: Le hash stocké en base de données
-        
+    """Vérifie un mot de passe contre son hash stocké.
+
+    Supporte la migration transparente SHA256 → bcrypt :
+    - Si le hash stocké est un SHA256 legacy (64 hex), vérifie avec SHA256.
+    - Si le hash stocké est bcrypt (commence par $2b$), vérifie avec bcrypt.
+    - Si bcrypt n'est pas disponible, repli sur SHA256.
+
     Returns:
-        bool: True si le mot de passe correspond, False sinon
+        bool: True si le mot de passe correspond
     """
-    hash_calcule = hash_sha256(mot_de_passe_entre)
-    return hash_calcule == hash_stocke
+    if not hash_stocke:
+        return False
+
+    # Hash bcrypt
+    if hash_stocke.startswith("$2b$") or hash_stocke.startswith("$2a$"):
+        if _BCRYPT_AVAILABLE:
+            return _PM.verify_password(mot_de_passe_entre, hash_stocke)
+        return False
+
+    # Hash SHA256 legacy
+    if _is_sha256_hash(hash_stocke):
+        return _sha256_hex(mot_de_passe_entre) == hash_stocke.lower()
+
+    # Fallback
+    return _sha256_hex(mot_de_passe_entre) == hash_stocke
+
+
+# Alias de compatibilité
+hash_sha256 = _sha256_hex
 
 
 def log_runtime_db_path(db_path: Path):
@@ -265,15 +307,32 @@ class LoginApp(QDialog):
         self.ui = Ui_Form()
         self.ui.setupUi(self)
         self.setWindowTitle("Connexion - CNPS Accueil")
-        
+
+        # Fenêtre sans cadre + fond transparent
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        # Bouton fermeture ✕ en haut à droite
+        self._btn_close = QtWidgets.QPushButton("✕", self.ui.widget)
+        self._btn_close.setGeometry(QtCore.QRect(538, 8, 26, 26))
+        self._btn_close.setStyleSheet(
+            "QPushButton { background: rgba(220,38,38,200); color: white;"
+            " border-radius: 13px; font-size: 12px; font-weight: 700; border: none; }"
+            "QPushButton:hover { background: rgba(239,68,68,255); }"
+            "QPushButton:pressed { background: rgba(185,28,28,255); }"
+        )
+        self._btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_close.clicked.connect(lambda: sys.exit(0))
+
         self.ui.pushButton.clicked.connect(self.se_connecter)
         self.ui.lineEdit.returnPressed.connect(self.se_connecter)
         self.ui.lineEdit_2.returnPressed.connect(self.se_connecter)
         
         # Labels de message
         self.message_label = QtWidgets.QLabel(self.ui.widget)
-        self.message_label.setGeometry(QtCore.QRect(295, 260, 190, 30))
+        self.message_label.setGeometry(QtCore.QRect(285, 255, 210, 60))
         self.message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.message_label.setWordWrap(True)
         self.message_label.setVisible(False)
         
         self.tentative_label = QtWidgets.QLabel(self.ui.widget)
@@ -282,6 +341,7 @@ class LoginApp(QDialog):
         self.tentative_label.setVisible(False)
         
         self.db_path = AppConfig.get_db_path()
+
         self.creer_table()
         self.creer_utilisateurs_defaut()
         self.charger_dernieres_identifiants()
@@ -298,22 +358,20 @@ class LoginApp(QDialog):
         return conn
 
     def charger_dernieres_identifiants(self):
-        """Charge les derniers identifiants valides depuis le stockage local."""
+        """Charge le dernier identifiant (username uniquement, jamais le mot de passe)."""
         last_username = self.settings.value("auth/last_username", "", type=str)
-        last_password = self.settings.value("auth/last_password", "", type=str)
+        # Purge l'ancien mot de passe en clair s'il était stocké
+        if self.settings.contains("auth/last_password"):
+            self.settings.remove("auth/last_password")
+            self.settings.sync()
 
         if last_username:
             self.ui.lineEdit.setText(last_username)
-        if last_password:
-            self.ui.lineEdit_2.setText(last_password)
+            print("✅ Dernier identifiant chargé")
 
-        if last_username or last_password:
-            print("✅ Derniers identifiants chargés")
-
-    def sauvegarder_dernieres_identifiants(self, username: str, password: str):
-        """Sauvegarde les derniers identifiants valides."""
+    def sauvegarder_dernier_identifiant(self, username: str):
+        """Sauvegarde uniquement le nom d'utilisateur (jamais le mot de passe)."""
         self.settings.setValue("auth/last_username", username)
-        self.settings.setValue("auth/last_password", password)
         self.settings.sync()
     
     def creer_table(self):
@@ -350,7 +408,7 @@ class LoginApp(QDialog):
             
             if count == 0:
                 for user in AppConfig.DEFAULT_USERS:
-                    password_hash = hash_sha256(user['password'])
+                    password_hash = hash_password(user['password'])
                     cursor.execute("""
                         INSERT INTO auth_user 
                         (username, password, email, is_active, is_superuser, is_staff, date_joined, role)
@@ -421,8 +479,11 @@ class LoginApp(QDialog):
                     print(f"✅ Connexion réussie: {identifiant} ({self.utilisateur['role']})")
                     self.tentatives = 0
                     self.afficher_message("✅ Connexion réussie!", "#28a745")
-                    self.sauvegarder_dernieres_identifiants(identifiant, mot_de_passe)
+                    self.sauvegarder_dernier_identifiant(identifiant)
                     self.mettre_a_jour_last_login(user[0])
+                    # Migration SHA256 → bcrypt si bcrypt disponible
+                    if _BCRYPT_AVAILABLE and _is_sha256_hash(user[2]):
+                        self._migrer_hash_bcrypt(user[0], mot_de_passe)
                     
                     # Ouvrir la fenêtre principale
                     print("🔍 Tentative d'ouverture de la fenêtre principale...")
@@ -447,12 +508,35 @@ class LoginApp(QDialog):
                 self.ui.lineEdit_2.setFocus()
                 
         except Exception as e:
-            self.afficher_message(f"❌ Erreur: {str(e)}", "#dc3545")
+            msg = str(e).lower()
+            if "unable to open database" in msg or "no such file" in msg:
+                self.afficher_message(
+                    "🌐 Réseau indisponible – base de données introuvable, vérifier le réseau.\n"
+                    "Contacter l'administrateur : N'Guessan Kouakou N'Goran Blanchard — 07 77 14 51 87",
+                    "#b45309",
+                )
+            else:
+                self.afficher_message(f"❌ Erreur: {str(e)}", "#dc3545")
             print(f"❌ Erreur base de données: {e}")
         finally:
             self.ui.pushButton.setEnabled(True)
             self.ui.pushButton.setText("Connexion")
     
+    def _migrer_hash_bcrypt(self, user_id, mot_de_passe: str):
+        """Remplace silencieusement un hash SHA256 legacy par un hash bcrypt."""
+        try:
+            nouveau_hash = _PM.hash_password(mot_de_passe)
+            conn = self._open_db_connection()
+            conn.execute(
+                "UPDATE auth_user SET password = ? WHERE id = ?",
+                (nouveau_hash, user_id),
+            )
+            conn.commit()
+            conn.close()
+            print(f"✅ Hash migré SHA256→bcrypt pour user id={user_id}")
+        except Exception as exc:
+            print(f"⚠️ Migration hash bcrypt échouée: {exc}")
+
     def mettre_a_jour_last_login(self, user_id: int):
         """Met à jour la date de dernière connexion
         
@@ -558,19 +642,155 @@ class LoginApp(QDialog):
         self.ui.pushButton.setEnabled(True)
         self.tentative_label.setVisible(False)
         self.afficher_message("✅ Compte déverrouillé", "#28a745")
-    
+
+    # ── Déplacement de la fenêtre sans barre de titre ────────────────────────
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.MouseButton.LeftButton and hasattr(self, "_drag_pos"):
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+
     def keyPressEvent(self, event):
-        """Gère les touches spéciales
-        
-        Args:
-            event: L'événement de touche
-        """
         if event.key() == Qt.Key.Key_Escape:
             sys.exit(0)
         elif event.key() == Qt.Key.Key_F1:
             self.afficher_aide()
+        elif (event.modifiers() == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+              and event.key() == Qt.Key.Key_R):
+            self._admin_reset_dialog()
         else:
             super().keyPressEvent(event)
+
+    def _admin_reset_dialog(self):
+        """Dialogue de réinitialisation protégé — accessible admin uniquement (Ctrl+Shift+R)."""
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Réinitialisation — Admin requis")
+        dlg.setFixedWidth(340)
+        dlg.setStyleSheet("QDialog { background:#f8fafc; }")
+
+        lay = QtWidgets.QVBoxLayout(dlg)
+        lay.setContentsMargins(20, 18, 20, 18)
+        lay.setSpacing(10)
+
+        lbl_title = QtWidgets.QLabel("🔐  Réinitialisation de la base de données")
+        lbl_title.setStyleSheet("font-weight:700; font-size:13px; color:#1e3a5f;")
+        lbl_title.setWordWrap(True)
+        lay.addWidget(lbl_title)
+
+        lbl_info = QtWidgets.QLabel(
+            "Cette action remet la configuration sur la base locale.\n"
+            "Réservée aux administrateurs."
+        )
+        lbl_info.setStyleSheet("color:#64748b; font-size:11px;")
+        lbl_info.setWordWrap(True)
+        lay.addWidget(lbl_info)
+
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#e2e8f0;")
+        lay.addWidget(sep)
+
+        f_user = QtWidgets.QLineEdit()
+        f_user.setPlaceholderText("Identifiant administrateur")
+        f_user.setStyleSheet(
+            "border:1px solid #d1d5db; border-radius:5px; padding:7px 10px; font-size:12px;"
+        )
+        lay.addWidget(f_user)
+
+        f_pass = QtWidgets.QLineEdit()
+        f_pass.setPlaceholderText("Mot de passe")
+        f_pass.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+        f_pass.setStyleSheet(
+            "border:1px solid #d1d5db; border-radius:5px; padding:7px 10px; font-size:12px;"
+        )
+        lay.addWidget(f_pass)
+
+        lbl_err = QtWidgets.QLabel()
+        lbl_err.setStyleSheet(
+            "color:#991b1b; background:#fee2e2; border-radius:4px; padding:5px 8px; font-size:11px;"
+        )
+        lbl_err.setVisible(False)
+        lbl_err.setWordWrap(True)
+        lay.addWidget(lbl_err)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_cancel = QtWidgets.QPushButton("Annuler")
+        btn_cancel.setStyleSheet(
+            "QPushButton { background:#64748b; color:white; border-radius:5px;"
+            " padding:7px 16px; font-weight:600; }"
+            "QPushButton:hover { background:#475569; }"
+        )
+        btn_confirm = QtWidgets.QPushButton("Réinitialiser")
+        btn_confirm.setStyleSheet(
+            "QPushButton { background:#b91c1c; color:white; border-radius:5px;"
+            " padding:7px 16px; font-weight:600; }"
+            "QPushButton:hover { background:#dc2626; }"
+        )
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_confirm)
+        lay.addLayout(btn_row)
+
+        def _do_reset():
+            username = f_user.text().strip()
+            password = f_pass.text()
+            if not username or not password:
+                lbl_err.setText("Identifiant et mot de passe requis.")
+                lbl_err.setVisible(True)
+                return
+
+            # Vérification TOUJOURS sur la base locale (indépendante du chemin configuré)
+            local_db = AppConfig._runtime_dir() / "db.sqlite3"
+            try:
+                conn = sqlite3.connect(str(local_db), timeout=5)
+                row = conn.execute(
+                    "SELECT password, role, is_superuser FROM auth_user "
+                    "WHERE username = ? AND is_active = 1",
+                    (username,),
+                ).fetchone()
+                conn.close()
+            except Exception as exc:
+                lbl_err.setText(f"Erreur accès base locale : {exc}")
+                lbl_err.setVisible(True)
+                return
+
+            if row is None:
+                lbl_err.setText("Utilisateur introuvable.")
+                lbl_err.setVisible(True)
+                return
+
+            stored_hash, role, is_super = row
+            if not verifier_mot_de_passe(password, stored_hash):
+                lbl_err.setText("Mot de passe incorrect.")
+                lbl_err.setVisible(True)
+                return
+
+            if role != "admin" and not is_super:
+                lbl_err.setText("Accès refusé — compte administrateur requis.")
+                lbl_err.setVisible(True)
+                return
+
+            # ── Authentification admin OK → réinitialiser ──
+            import json as _json
+            cfg = AppConfig.DB_CONFIG_FILE
+            try:
+                cfg.write_text(
+                    _json.dumps({"custom_db_path": ""}, indent=2), encoding="utf-8"
+                )
+            except Exception:
+                cfg.unlink(missing_ok=True)
+
+            dlg.accept()
+            self.db_path = AppConfig.get_db_path()
+            self.creer_table()
+            self.creer_utilisateurs_defaut()
+            self.afficher_message("✅ Base locale restaurée", "#28a745")
+
+        btn_confirm.clicked.connect(_do_reset)
+        f_pass.returnPressed.connect(_do_reset)
+        dlg.exec()
     
     def afficher_aide(self):
         """Affiche l'aide en ligne"""

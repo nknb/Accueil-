@@ -3,6 +3,7 @@
 
 from pathlib import Path
 from typing import Optional
+import json
 import os
 import sys
 
@@ -17,6 +18,12 @@ class AppConfig:
     ]
 
     DB_ENV_VAR = "CNPS_DB_PATH"
+
+    # Fichier de configuration persistante (chemin DB personnalisé)
+    DB_CONFIG_FILE = APP_ROOT / "db_config.json"
+
+    # Chemin réseau par défaut de production
+    DEFAULT_NETWORK_DB = "//srvgagnoa/prod/datagagnoa/accueil/db.sqlite3"
 
     @classmethod
     def _runtime_dir(cls) -> Path:
@@ -38,11 +45,28 @@ class AppConfig:
 
     @classmethod
     def get_db_path(cls) -> Path:
-        """Trouve et retourne le chemin vers la BD SQLite
-        
+        """Trouve et retourne le chemin vers la BD SQLite.
+
+        Priorité :
+          1. db_config.json (configuré via l'onglet Configuration)
+          2. Variable d'environnement CNPS_DB_PATH
+          3. Base locale (dossier runtime / APP_ROOT)
+
         Returns:
             Path: Chemin vers la base de données
         """
+        # 1. Chemin configuré manuellement via l'onglet Configuration
+        if cls.DB_CONFIG_FILE.exists():
+            try:
+                data = json.loads(cls.DB_CONFIG_FILE.read_text(encoding="utf-8"))
+                custom = data.get("custom_db_path", "").strip()
+                if custom:
+                    candidate = Path(custom)
+                    print(f"[CONFIG] Chemin base de données configuré : {candidate}")
+                    return candidate
+            except Exception as e:
+                print(f"[WARN] Lecture db_config.json échouée : {e}")
+
         runtime_db = cls._runtime_dir() / "db.sqlite3"
 
         # Mode exécutable: base strictement locale au dossier de l'application
@@ -88,8 +112,8 @@ class AppConfig:
         - Dossier local: WAL pour de meilleures performances.
         - Partage réseau UNC: DELETE pour éviter les problèmes de WAL sur SMB.
         """
-        db_str = str(db_path)
-        is_unc_path = db_str.startswith("\\\\")
+        db_str = str(db_path).replace("\\", "/")
+        is_unc_path = db_str.startswith("//") or str(db_path).startswith("\\\\")
 
         return {
             "journal_mode": "DELETE" if is_unc_path else "WAL",
