@@ -10,7 +10,7 @@ import sqlite3
 import hashlib
 import warnings
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Bcrypt disponible via utils/password_manager
 try:
@@ -204,6 +204,9 @@ class Ui_Form(object):
 
 # ===== PARTIE 2: FONCTIONS DE HASHAGE =====
 
+_HEX_CHARS = frozenset("0123456789abcdef")
+
+
 def _sha256_hex(mot_de_passe: str) -> str:
     """Hash SHA256 brut (usage interne migration uniquement)."""
     return hashlib.sha256(mot_de_passe.encode("utf-8")).hexdigest()
@@ -211,7 +214,7 @@ def _sha256_hex(mot_de_passe: str) -> str:
 
 def _is_sha256_hash(h: str) -> bool:
     """Détecte si un hash est au format SHA256 legacy (64 caractères hex)."""
-    return len(h) == 64 and all(c in "0123456789abcdef" for c in h.lower())
+    return len(h) == 64 and all(c in _HEX_CHARS for c in h.lower())
 
 
 def hash_password(mot_de_passe: str) -> str:
@@ -733,7 +736,18 @@ class LoginApp(QDialog):
         btn_row.addWidget(btn_confirm)
         lay.addLayout(btn_row)
 
+        _reset_attempts = [0]
+        _reset_locked_until = [None]  # datetime | None
+
         def _do_reset():
+            # ── Rate-limit : 3 tentatives max, verrouillage 5 min ──
+            now = datetime.now()
+            if _reset_locked_until[0] and now < _reset_locked_until[0]:
+                remaining = int((_reset_locked_until[0] - now).total_seconds() / 60) + 1
+                lbl_err.setText(f"Trop de tentatives. Réessayez dans {remaining} min.")
+                lbl_err.setVisible(True)
+                return
+
             username = f_user.text().strip()
             password = f_pass.text()
             if not username or not password:
@@ -757,13 +771,24 @@ class LoginApp(QDialog):
                 return
 
             if row is None:
+                _reset_attempts[0] += 1
                 lbl_err.setText("Utilisateur introuvable.")
                 lbl_err.setVisible(True)
+                if _reset_attempts[0] >= 3:
+                    _reset_locked_until[0] = datetime.now() + timedelta(minutes=5)
                 return
 
             stored_hash, role, is_super = row
             if not verifier_mot_de_passe(password, stored_hash):
-                lbl_err.setText("Mot de passe incorrect.")
+                _reset_attempts[0] += 1
+                if _reset_attempts[0] >= 3:
+                    _reset_locked_until[0] = datetime.now() + timedelta(minutes=5)
+                    lbl_err.setText("Trop de tentatives. Compte verrouillé 5 min.")
+                else:
+                    lbl_err.setText(
+                        f"Mot de passe incorrect. "
+                        f"({3 - _reset_attempts[0]} essai(s) restant(s))"
+                    )
                 lbl_err.setVisible(True)
                 return
 
@@ -795,20 +820,15 @@ class LoginApp(QDialog):
     def afficher_aide(self):
         """Affiche l'aide en ligne"""
         aide = """
-        <h2>🔐 Aide à la connexion</h2>
-        <h3>📝 Comment se connecter :</h3>
+        <h2>Aide à la connexion</h2>
+        <h3>Comment se connecter :</h3>
         <ul>
             <li>Entrez votre <b>identifiant</b></li>
             <li>Entrez votre <b>mot de passe</b></li>
             <li>Cliquez sur <b>Connexion</b> ou appuyez sur <b>Entrée</b></li>
         </ul>
-        <h3>👥 Comptes de test :</h3>
-        <ul>
-            <li><b>admin</b> / admin123 - 👑 Administrateur</li>
-            <li><b>manager</b> / manager123 - 📊 Manager</li>
-            <li><b>accueil</b> / accueil123 - 🏢 Agent Accueil</li>
-            <li><b>preaccueil</b> / preaccueil123 - 🛂 Agent Pré-accueil</li>
-        </ul>
+        <h3>Problème de connexion ?</h3>
+        <p>Contactez votre administrateur système pour obtenir vos identifiants.</p>
         """
         QMessageBox.information(self, "Aide - Connexion", aide)
 

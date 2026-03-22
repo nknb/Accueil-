@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import os
+from collections import Counter
 from datetime import datetime
 from typing import Optional
+
+_CAL_ICON_DB = os.path.join(os.path.dirname(__file__), "icons", "calendar.svg").replace("\\", "/")
 
 import openpyxl
 from openpyxl.styles import PatternFill, Font as XlFont, Alignment, Border, Side
@@ -261,13 +264,12 @@ class DatabasePage(QMainWindow):
 
     TABLE = "accueil_demandeaccueil"
 
-    # Tri courant : (col_key, ascending)
-    _sort_col: str   = "date"
-    _sort_asc: bool  = False
-
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Base de données")
+        # Tri courant : (col_key, ascending) — instance pour éviter partage entre fenêtres
+        self._sort_col: str  = "date"
+        self._sort_asc: bool = False
 
         self.all_records:      list[dict] = []
         self.filtered_records: list[dict] = []
@@ -459,12 +461,16 @@ class DatabasePage(QMainWindow):
 
         # ── Plage personnalisée ──────────────────────────────────────────
         hl.addWidget(QLabel("Du :"))
+        _cal_drop_qss = (
+            f"QDateEdit::drop-down {{ image: url({_CAL_ICON_DB}); width: 14px; height: 14px; border: none; }}"
+        )
         self._de_from = QDateEdit()
         self._de_from.setCalendarPopup(True)
         self._de_from.setDisplayFormat("dd/MM/yyyy")
         self._de_from.setDate(QDate.currentDate().addMonths(-1))
         self._de_from.setFixedHeight(28)
         self._de_from.setFixedWidth(100)
+        self._de_from.setStyleSheet(_cal_drop_qss)
         self._de_from.dateChanged.connect(self._on_custom_date_changed)
         hl.addWidget(self._de_from)
 
@@ -475,6 +481,7 @@ class DatabasePage(QMainWindow):
         self._de_to.setDate(QDate.currentDate())
         self._de_to.setFixedHeight(28)
         self._de_to.setFixedWidth(100)
+        self._de_to.setStyleSheet(_cal_drop_qss)
         self._de_to.dateChanged.connect(self._on_custom_date_changed)
         hl.addWidget(self._de_to)
 
@@ -834,6 +841,10 @@ class DatabasePage(QMainWindow):
 
     def _apply_filters(self, reset_page: bool = True) -> None:
         col_filters = {k: self._get_filter_value(k) for k in _COL_KEYS}
+        # Pré-cache : True = exact match (QComboBox), False = sous-chaîne (QLineEdit)
+        combo_keys = frozenset(
+            k for k in _COL_KEYS if isinstance(self._filter_widgets.get(k), QComboBox)
+        )
 
         result = []
         for rec in self.all_records:
@@ -863,7 +874,7 @@ class DatabasePage(QMainWindow):
                 if not fval:
                     continue
                 cell = str(rec.get(key) or "").lower()
-                if isinstance(self._filter_widgets.get(key), QComboBox):
+                if key in combo_keys:
                     if cell != fval:
                         skip = True; break
                 else:
@@ -976,12 +987,11 @@ class DatabasePage(QMainWindow):
     # ── Stats ─────────────────────────────────────────────────────────────────
 
     def _update_stats(self) -> None:
-        total    = len(self.all_records)
-        traites  = sum(1 for r in self.all_records if str(r.get("statut") or "").lower() == "traite")
-        attentes = sum(1 for r in self.all_records if str(r.get("statut") or "").lower() == "en_attente")
+        total  = len(self.all_records)
+        counts = Counter(str(r.get("statut") or "").lower() for r in self.all_records)
         self._stat_total.setText(f"Total : {total:,}")
-        self._stat_traite.setText(f"Traitées : {traites:,}")
-        self._stat_attente.setText(f"En attente : {attentes:,}")
+        self._stat_traite.setText(f"Traitées : {counts['traite']:,}")
+        self._stat_attente.setText(f"En attente : {counts['en_attente']:,}")
 
     def _update_filter_stat(self, n: int) -> None:
         total = len(self.all_records)
@@ -1002,8 +1012,13 @@ class DatabasePage(QMainWindow):
 
     # ── Pagination ────────────────────────────────────────────────────────────
 
+    _MAX_DISPLAY_ALL = 500  # Seuil de sécurité pour l'option "Tous"
+
     def _on_items_changed(self, value: str) -> None:
-        self.items_per_page = len(self.all_records) if value == "Tous" else int(value)
+        if value == "Tous":
+            self.items_per_page = min(len(self.all_records), self._MAX_DISPLAY_ALL)
+        else:
+            self.items_per_page = int(value)
         self.current_page = 1
         self._apply_filters(reset_page=True)
 

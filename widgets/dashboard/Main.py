@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QApplication,
     QFileDialog,
+    QLineEdit,
     QMessageBox,
     QProgressDialog,
 )
@@ -39,6 +40,9 @@ import os
 import platform
 
 from database.connection import db
+
+_DASHBOARD_ICONS_DIR = os.path.dirname(__file__)
+_CAL_ICON_DASHBOARD = os.path.join(_DASHBOARD_ICONS_DIR, "icons", "calendar.svg").replace("\\", "/")
 from ui.dashboard_theme import (
     _BG_DEEP, _BG_CARD, _BG_HDR, _BORDER,
     _TXT1, _TXT2, _TXT3, _GRID,
@@ -276,20 +280,11 @@ class _DashboardWorker(QObject):
 # ── Fiche détaillée usager ────────────────────────────────────────────────────
 
 class _UserDetailDialog(QDialog):
-    """Popup de statistiques individuelles pour un usager — design amélioré."""
+    """Fiche usager complète — 3 onglets : Vue d'ensemble · Historique · Analyse IA."""
 
     _AVATAR_COLORS = ["#1d4ed8", "#0891b2", "#059669", "#7c3aed", "#be185d", "#b45309"]
 
-    def __init__(self, user: dict, parent=None) -> None:
-        super().__init__(parent)
-        self._user = user
-        self.setWindowTitle(f"{user['nom']} {user['prenom']} — Fiche usager")
-        self.setMinimumWidth(860)
-        self.setMinimumHeight(620)
-        self.setStyleSheet(f"QDialog {{ background:{_BG_DEEP}; }}")
-        self._build_ui()
-
-    # ── helpers ──────────────────────────────────────────────────────────────
+    # ── helpers statiques ─────────────────────────────────────────────────────
     @staticmethod
     def _avatar_color(name: str) -> str:
         idx = (ord(name[0]) if name else 0) % len(_UserDetailDialog._AVATAR_COLORS)
@@ -297,101 +292,383 @@ class _UserDetailDialog(QDialog):
 
     @staticmethod
     def _stars(avg: float) -> str:
-        """Renvoie '★★★☆☆' pour avg=3.0."""
         filled = round(avg)
         return "★" * filled + "☆" * (5 - filled)
 
-    def _build_ui(self) -> None:
-        from PyQt6.QtWidgets import (
-            QTableWidget, QTableWidgetItem, QHeaderView, QScrollArea,
+    @staticmethod
+    def _fmt_wait(minutes: float) -> str:
+        h, m = divmod(int(minutes), 60)
+        return f"{h}h {m:02d}min" if h else f"{m} min"
+
+    @staticmethod
+    def _kpi_card(icon: str, title: str, val: str, sub: str, clr: str) -> QFrame:
+        card = QFrame()
+        card.setStyleSheet(
+            f"QFrame {{ background:{_BG_CARD}; border-radius:10px;"
+            f" border:1px solid {_BORDER}; border-left:4px solid {clr}; }}"
         )
+        box = QVBoxLayout(card)
+        box.setContentsMargins(12, 10, 12, 10)
+        box.setSpacing(2)
+        lt = QLabel(f"{icon}  {title}")
+        lt.setStyleSheet(
+            f"color:{_TXT3}; font-size:10px; font-weight:600; background:transparent; border:none;"
+        )
+        clr_v = "#a78bfa" if "★" in val else clr
+        lv = QLabel(val)
+        lv.setStyleSheet(
+            f"color:{clr_v}; font-size:{'12px' if '★' in val else '18px'};"
+            f" font-weight:800; background:transparent; border:none;"
+        )
+        box.addWidget(lt)
+        box.addWidget(lv)
+        if sub:
+            ls = QLabel(sub)
+            ls.setStyleSheet(
+                f"color:{_TXT3}; font-size:9px; background:transparent; border:none;"
+            )
+            box.addWidget(ls)
+        return card
+
+    @staticmethod
+    def _mini_bar_chart(title: str, counter, clr: str) -> QFrame:
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"background:{_BG_CARD}; border-radius:12px; border:1px solid {_BORDER};"
+        )
+        fl = QVBoxLayout(frame)
+        fl.setContentsMargins(16, 12, 16, 12)
+        fl.setSpacing(6)
+        lbl_t = QLabel(title)
+        lbl_t.setStyleSheet(
+            f"color:{_TXT2}; font-size:11px; font-weight:700; background:transparent; border:none;"
+        )
+        fl.addWidget(lbl_t)
+        total = sum(counter.values())
+        for name, cnt in counter.most_common(6):
+            pct   = cnt / total if total else 0
+            bar_w = int(pct * 22)
+            row   = QHBoxLayout()
+            row.setSpacing(8)
+            lbl_n = QLabel(_truncate(str(name), 26))
+            lbl_n.setStyleSheet(
+                f"color:{_TXT2}; font-size:10px; min-width:130px; background:transparent; border:none;"
+            )
+            lbl_b = QLabel("█" * bar_w + "░" * (22 - bar_w))
+            lbl_b.setStyleSheet(
+                f"color:{clr}; font-family:monospace; font-size:10px;"
+                f" background:transparent; border:none;"
+            )
+            lbl_c = QLabel(f"{cnt}  ({pct*100:.0f}%)")
+            lbl_c.setStyleSheet(
+                f"color:{_TXT3}; font-size:10px; background:transparent; border:none;"
+            )
+            row.addWidget(lbl_n)
+            row.addWidget(lbl_b, 1)
+            row.addWidget(lbl_c)
+            fl.addLayout(row)
+        return frame
+
+    # ── constructeur ─────────────────────────────────────────────────────────
+    def __init__(self, user: dict, parent=None) -> None:
+        super().__init__(parent)
+        self._user = user
+        self.setWindowTitle(
+            f"{user.get('nom', '')} {user.get('prenom', '')} — Fiche usager"
+        )
+        self.setMinimumWidth(1040)
+        self.setMinimumHeight(760)
+        self.setStyleSheet(f"QDialog {{ background:{_BG_DEEP}; }}")
+        self._stats = self._load_user_stats()
+        self._build_ui()
+
+    # ── chargement données + calculs IA ──────────────────────────────────────
+    def _load_user_stats(self) -> dict:
+        from collections import Counter
+        from datetime import datetime, timedelta
+
         u = self._user
-        stats = self._load_user_stats()
+        _empty = {
+            "visites": [], "nb_traite": 0, "nb_attente": 0, "nb_non_traite": 0,
+            "avg_wait": 0.0, "min_wait": 0, "max_wait": 0,
+            "avg_sat": 0.0, "sat_dist": {},
+            "top_service": "", "top_motif": "", "svc_cnt": {}, "mot_cnt": {},
+            "premiere_visite": "—", "derniere_visite": "—",
+            "jours_depuis": None, "avg_interval": None,
+            "jour_prefere": "—", "heure_preferee": "—",
+            "tendance": "stable",
+            "score_fidelite": 0, "risque_abandon": "inconnu",
+            "prochaine_visite": "—", "est_en_retard": False, "profil": "—",
+        }
+        try:
+            if u.get("cnps"):
+                where = "WHERE TRIM(d.numero_cnps) = ?"
+                bind  = (u["cnps"],)
+            else:
+                where = "WHERE UPPER(TRIM(d.nom)) = ? AND TRIM(d.prenom) = ?"
+                bind  = (u["nom"], u["prenom"])
 
-        main_lay = QVBoxLayout(self)
-        main_lay.setContentsMargins(0, 0, 0, 0)
-        main_lay.setSpacing(0)
+            rows = db.execute_query(
+                f"""SELECT d.id, d.date, s.nom AS service, m.nom AS motif,
+                           d.priorite, d.statut, d.temps_attente,
+                           d.satisfaction, d.heure_arrivee, d.contacts
+                    FROM accueil_demandeaccueil d
+                    LEFT JOIN accueil_service s ON d.service_demande_id = s.id
+                    LEFT JOIN accueil_motif   m ON d.motif_id = m.id
+                    {where}
+                    ORDER BY d.date DESC, d.heure_arrivee DESC""",
+                bind,
+            )
 
-        # ── En-tête gradient ─────────────────────────────────────────────────
+            # ── comptages statut ───────────────────────────────────────────
+            nb_traite     = sum(1 for r in rows if (r.get("statut") or "") == "traite")
+            nb_attente    = sum(1 for r in rows if (r.get("statut") or "") == "en_attente")
+            nb_non_traite = sum(1 for r in rows if (r.get("statut") or "") == "non_traite")
+
+            # ── temps d'attente ────────────────────────────────────────────
+            def _to_min(t):
+                if not t: return None
+                try: return int(str(t)[:2]) * 60 + int(str(t)[3:5])
+                except: return None
+
+            waits    = [w for w in (_to_min(r.get("temps_attente")) for r in rows) if w is not None]
+            avg_wait = sum(waits) / len(waits) if waits else 0.0
+            min_wait = min(waits) if waits else 0
+            max_wait = max(waits) if waits else 0
+
+            # ── satisfaction ───────────────────────────────────────────────
+            sats    = [int(r["satisfaction"]) for r in rows
+                       if r.get("satisfaction") and str(r["satisfaction"]).isdigit()]
+            avg_sat  = sum(sats) / len(sats) if sats else 0.0
+            sat_dist = Counter(sats)
+
+            # ── services / motifs ──────────────────────────────────────────
+            svc_cnt = Counter(
+                r.get("service") for r in rows
+                if r.get("service") and r.get("service") not in ("—", "")
+            )
+            mot_cnt = Counter(
+                r.get("motif") for r in rows
+                if r.get("motif") and r.get("motif") not in ("—", "")
+            )
+
+            # ── dates ──────────────────────────────────────────────────────
+            dates_parsed = []
+            for r in rows:
+                try:
+                    dates_parsed.append(
+                        datetime.strptime(str(r.get("date") or "")[:10], "%Y-%m-%d").date()
+                    )
+                except Exception:
+                    pass
+
+            premiere_visite = str(min(dates_parsed)) if dates_parsed else "—"
+            derniere_visite = str(max(dates_parsed)) if dates_parsed else "—"
+            today           = datetime.now().date()
+            jours_depuis    = (today - max(dates_parsed)).days if dates_parsed else None
+
+            avg_interval = None
+            if len(dates_parsed) >= 2:
+                sd = sorted(dates_parsed)
+                intervals    = [(sd[i + 1] - sd[i]).days for i in range(len(sd) - 1)]
+                avg_interval = sum(intervals) / len(intervals)
+
+            # ── préférences jour / heure ───────────────────────────────────
+            _JOUR = {
+                0: "Lundi", 1: "Mardi", 2: "Mercredi", 3: "Jeudi",
+                4: "Vendredi", 5: "Samedi", 6: "Dimanche",
+            }
+            jour_cnt  = Counter()
+            heure_cnt = Counter()
+            for r in rows:
+                try:
+                    jour_cnt[
+                        datetime.strptime(str(r.get("date") or "")[:10], "%Y-%m-%d").weekday()
+                    ] += 1
+                except Exception:
+                    pass
+                h_str = str(r.get("heure_arrivee") or "")[:2]
+                if h_str.isdigit():
+                    heure_cnt[int(h_str)] += 1
+
+            jour_prefere   = _JOUR.get(jour_cnt.most_common(1)[0][0], "—") if jour_cnt else "—"
+            heure_preferee = f"{heure_cnt.most_common(1)[0][0]:02d}h00" if heure_cnt else "—"
+
+            # ── tendance satisfaction (5 dernières vs 5 précédentes) ───────
+            tendance = "stable"
+            if len(sats) >= 6:
+                r5 = sum(sats[:5]) / 5
+                p5 = sum(sats[5:10]) / min(5, len(sats) - 5)
+                tendance = "hausse" if r5 > p5 + 0.4 else ("baisse" if r5 < p5 - 0.4 else "stable")
+
+            # ── IA / scoring RFM ───────────────────────────────────────────
+            # R = Récence (40 pts)  F = Fréquence (40 pts)  M = Satisfaction (20 pts)
+            freq_score = min(40, len(rows) * 2)
+            if jours_depuis is not None and avg_interval:
+                ratio         = jours_depuis / avg_interval
+                recency_score = max(0, int(40 * max(0.0, 1.0 - ratio / 2.0)))
+            elif jours_depuis is not None:
+                recency_score = max(0, 40 - min(40, jours_depuis // 8))
+            else:
+                recency_score = 20
+            sat_score      = int(avg_sat / 5 * 20) if avg_sat else 0
+            score_fidelite = min(100, freq_score + recency_score + sat_score)
+
+            if jours_depuis is None:
+                risque_abandon = "inconnu"
+            elif avg_interval and jours_depuis > avg_interval * 2.0:
+                risque_abandon = "élevé"
+            elif avg_interval and jours_depuis > avg_interval * 1.5:
+                risque_abandon = "moyen"
+            elif jours_depuis is not None and jours_depuis > 180:
+                risque_abandon = "moyen"
+            else:
+                risque_abandon = "faible"
+
+            prochaine_visite = "—"
+            est_en_retard    = False
+            if dates_parsed and avg_interval:
+                nv               = max(dates_parsed) + timedelta(days=int(avg_interval))
+                prochaine_visite = str(nv)
+                est_en_retard    = nv < today
+
+            profil = (
+                "Usager régulier"    if len(rows) >= 10 else
+                "Usager occasionnel" if len(rows) >= 5  else
+                "Usager rare"        if len(rows) >= 2  else
+                "Première visite"
+            )
+
+            return {
+                "visites": rows, "nb_traite": nb_traite, "nb_attente": nb_attente,
+                "nb_non_traite": nb_non_traite,
+                "avg_wait": avg_wait, "min_wait": min_wait, "max_wait": max_wait,
+                "avg_sat": avg_sat, "sat_dist": sat_dist,
+                "top_service": svc_cnt.most_common(1)[0][0] if svc_cnt else "",
+                "top_motif":   mot_cnt.most_common(1)[0][0] if mot_cnt else "",
+                "svc_cnt": svc_cnt, "mot_cnt": mot_cnt,
+                "premiere_visite": premiere_visite, "derniere_visite": derniere_visite,
+                "jours_depuis": jours_depuis, "avg_interval": avg_interval,
+                "jour_prefere": jour_prefere, "heure_preferee": heure_preferee,
+                "tendance": tendance,
+                "score_fidelite": score_fidelite, "risque_abandon": risque_abandon,
+                "prochaine_visite": prochaine_visite, "est_en_retard": est_en_retard,
+                "profil": profil,
+            }
+        except Exception:
+            return _empty
+
+    # ── construction UI principale ────────────────────────────────────────────
+    def _build_ui(self) -> None:
+        from PyQt6.QtWidgets import QTabWidget
+
+        u     = self._user
+        stats = self._stats
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        root.addWidget(self._build_header(u, stats))
+
+        tabs = QTabWidget()
+        tabs.setStyleSheet(f"""
+            QTabWidget::pane {{ border:none; background:{_BG_DEEP}; }}
+            QTabBar::tab {{
+                background:{_BG_HDR}; color:{_TXT2};
+                padding:10px 24px; font-size:12px; font-weight:600;
+                border:none; border-bottom:3px solid transparent; min-width:130px;
+            }}
+            QTabBar::tab:selected {{
+                color:white; background:{_BG_CARD};
+                border-bottom:3px solid {_C_NAVY};
+            }}
+            QTabBar::tab:hover {{ color:{_TXT1}; }}
+        """)
+        tabs.addTab(self._build_tab_overview(stats),
+                    f"📊  Vue d'ensemble")
+        tabs.addTab(self._build_tab_history(stats),
+                    f"📅  Historique ({len(stats['visites'])} visites)")
+        tabs.addTab(self._build_tab_ia(stats),
+                    "🤖  Analyse IA")
+        root.addWidget(tabs)
+
+    # ── En-tête ───────────────────────────────────────────────────────────────
+    def _build_header(self, u: dict, stats: dict) -> QFrame:
         hdr = QFrame()
         hdr.setStyleSheet(
             "background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
             f"stop:0 #0f172a, stop:0.4 {_C_NAVY}, stop:1 #1e40af); border:none;"
         )
-        hdr.setFixedHeight(82)
-        hdr_lay = QHBoxLayout(hdr)
-        hdr_lay.setContentsMargins(20, 14, 20, 14)
-        hdr_lay.setSpacing(14)
+        hdr.setFixedHeight(88)
+        lay = QHBoxLayout(hdr)
+        lay.setContentsMargins(20, 14, 20, 14)
+        lay.setSpacing(14)
 
-        # Cercle avatar avec initiale
-        initiale = (u["nom"][0] if u["nom"] else "?").upper()
-        av_clr = self._avatar_color(u["nom"])
-        lbl_av = QLabel(initiale)
-        lbl_av.setFixedSize(50, 50)
+        initiale = (u.get("nom", "?")[0] if u.get("nom") else "?").upper()
+        av_clr   = self._avatar_color(u.get("nom", ""))
+        lbl_av   = QLabel(initiale)
+        lbl_av.setFixedSize(54, 54)
         lbl_av.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl_av.setStyleSheet(
-            f"background:{av_clr}; color:white; font-size:20px; font-weight:800;"
-            f" border-radius:25px; border:2px solid rgba(255,255,255,0.3);"
+            f"background:{av_clr}; color:white; font-size:22px; font-weight:800;"
+            f" border-radius:27px; border:2px solid rgba(255,255,255,0.3);"
         )
-        hdr_lay.addWidget(lbl_av)
+        lay.addWidget(lbl_av)
 
-        # Info nom/meta
-        info_lay = QVBoxLayout()
-        info_lay.setSpacing(3)
-        lbl_name = QLabel(f"{u['nom']}  {u['prenom']}")
+        info_col = QVBoxLayout()
+        info_col.setSpacing(3)
+        lbl_name = QLabel(f"{u.get('nom', '')}  {u.get('prenom', '')}")
         lbl_name.setStyleSheet(
             "color:white; font-size:17px; font-weight:700; background:transparent;"
         )
-        meta_parts = []
-        if u.get("cnps"):
-            meta_parts.append(f"N° CNPS : {u['cnps']}")
-        if u.get("contact"):
-            meta_parts.append(f"📞 {u['contact']}")
-        lbl_meta = QLabel("   |   ".join(meta_parts) if meta_parts else "Aucune info complémentaire")
+        meta = []
+        if u.get("cnps"):    meta.append(f"N° CNPS : {u['cnps']}")
+        if u.get("contact"): meta.append(f"📞 {u['contact']}")
+        meta.append(f"🏷 {stats['profil']}")
+        lbl_meta = QLabel("   ·   ".join(meta))
         lbl_meta.setStyleSheet("color:#93c5fd; font-size:11px; background:transparent;")
-        info_lay.addWidget(lbl_name)
-        info_lay.addWidget(lbl_meta)
-        hdr_lay.addLayout(info_lay, 1)
+        info_col.addWidget(lbl_name)
+        info_col.addWidget(lbl_meta)
+        lay.addLayout(info_col, 1)
 
-        # Badge visites
-        badge = QFrame()
-        badge.setStyleSheet(
-            "background:rgba(251,191,36,0.15); border:1px solid #f59e0b;"
-            " border-radius:8px; padding:0px;"
-        )
-        badge_lay = QVBoxLayout(badge)
-        badge_lay.setContentsMargins(12, 6, 12, 6)
-        badge_lay.setSpacing(0)
-        QLabel(str(u["nb_visites"]), badge).setParent(None)
-        lbl_nb = QLabel(str(u["nb_visites"]))
-        lbl_nb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_nb.setStyleSheet("color:#fbbf24; font-size:22px; font-weight:900; background:transparent; border:none;")
-        lbl_v  = QLabel("visites")
-        lbl_v.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_v.setStyleSheet("color:#fde68a; font-size:10px; background:transparent; border:none;")
-        badge_lay.addWidget(lbl_nb)
-        badge_lay.addWidget(lbl_v)
-        hdr_lay.addWidget(badge)
-
-        # Satisfaction badge
-        if stats["avg_sat"]:
-            sat_badge = QFrame()
-            sat_badge.setStyleSheet(
-                "background:rgba(124,58,237,0.15); border:1px solid #7c3aed;"
-                " border-radius:8px;"
+        def _hdr_badge(top_val: str, top_lbl: str, border_clr: str,
+                       val_clr: str, lbl_clr: str) -> QFrame:
+            b    = QFrame()
+            b.setStyleSheet(
+                f"background:rgba(255,255,255,0.07); border:1px solid {border_clr};"
+                f" border-radius:8px;"
             )
-            sb_lay = QVBoxLayout(sat_badge)
-            sb_lay.setContentsMargins(12, 6, 12, 6)
-            sb_lay.setSpacing(0)
-            lbl_stars = QLabel(self._stars(stats["avg_sat"]))
-            lbl_stars.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl_stars.setStyleSheet("color:#a78bfa; font-size:14px; background:transparent; border:none;")
-            lbl_sat_v = QLabel(f"{stats['avg_sat']:.1f}/5")
-            lbl_sat_v.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl_sat_v.setStyleSheet("color:#c4b5fd; font-size:10px; background:transparent; border:none;")
-            sb_lay.addWidget(lbl_stars)
-            sb_lay.addWidget(lbl_sat_v)
-            hdr_lay.addWidget(sat_badge)
+            bl   = QVBoxLayout(b)
+            bl.setContentsMargins(12, 6, 12, 6)
+            bl.setSpacing(0)
+            lv   = QLabel(top_val)
+            lv.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lv.setStyleSheet(
+                f"color:{val_clr}; font-size:20px; font-weight:900;"
+                f" background:transparent; border:none;"
+            )
+            ll   = QLabel(top_lbl)
+            ll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            ll.setStyleSheet(
+                f"color:{lbl_clr}; font-size:10px; background:transparent; border:none;"
+            )
+            bl.addWidget(lv)
+            bl.addWidget(ll)
+            return b
+
+        lay.addWidget(_hdr_badge(
+            str(u.get("nb_visites", 0)), "visites",
+            "#f59e0b", "#fbbf24", "#fde68a",
+        ))
+        if stats["avg_sat"]:
+            lay.addWidget(_hdr_badge(
+                self._stars(stats["avg_sat"]), f"{stats['avg_sat']:.1f}/5",
+                "#7c3aed", "#a78bfa", "#c4b5fd",
+            ))
+        sc     = stats["score_fidelite"]
+        sc_clr = _C_GREEN if sc >= 70 else (_C_AMBER if sc >= 40 else "#ef4444")
+        lay.addWidget(_hdr_badge(f"{sc}/100", "score fidélité", sc_clr, sc_clr, "#cbd5e1"))
 
         btn_close = QPushButton("✕")
         btn_close.setFixedSize(30, 30)
@@ -402,101 +679,191 @@ class _UserDetailDialog(QDialog):
         )
         btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_close.clicked.connect(self.reject)
-        hdr_lay.addWidget(btn_close)
-        main_lay.addWidget(hdr)
+        lay.addWidget(btn_close)
+        return hdr
 
-        # ── Barre KPI ─────────────────────────────────────────────────────────
-        kpi_row = QWidget()
-        kpi_row.setStyleSheet(f"background:{_BG_DEEP};")
-        kpi_hbox = QHBoxLayout(kpi_row)
-        kpi_hbox.setContentsMargins(16, 12, 16, 8)
-        kpi_hbox.setSpacing(10)
+    # ── Onglet 1 : Vue d'ensemble ─────────────────────────────────────────────
+    def _build_tab_overview(self, stats: dict) -> QWidget:
+        from PyQt6.QtWidgets import QScrollArea
 
-        avg_h, avg_m = divmod(int(stats["avg_wait"] or 0), 60)
-        avg_wait_str = f"{avg_h}h {avg_m:02d}min" if avg_h else f"{avg_m} min"
-        sat_str = self._stars(stats["avg_sat"]) if stats["avg_sat"] else "—"
-        sat_sub = f"{stats['avg_sat']:.1f} / 5" if stats["avg_sat"] else "Aucune note"
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border:none; background:transparent; }")
 
-        _kpis = [
-            ("🗓", "Visites",        str(u["nb_visites"]),  "",           _C_NAVY),
-            ("✅", "Traités",         str(stats["nb_traite"]),  "",        _C_GREEN),
-            ("⏳", "En attente",      str(stats["nb_attente"]),  "",       _C_AMBER),
-            ("⌚", "Attente moy.",    avg_wait_str,          "",           _C_BLUE),
-            ("⭐", "Satisfaction",    sat_str,               sat_sub,      "#7c3aed"),
-        ]
-        for icon, title, val, sub, clr in _kpis:
-            card = QFrame()
-            card.setStyleSheet(
-                f"QFrame {{ background:{_BG_CARD}; border-radius:10px;"
-                f" border:1px solid {_BORDER}; border-left:4px solid {clr}; }}"
-            )
-            cbox = QVBoxLayout(card)
-            cbox.setContentsMargins(12, 10, 12, 10)
-            cbox.setSpacing(2)
-            lbl_t = QLabel(f"{icon}  {title}")
-            lbl_t.setStyleSheet(f"color:{_TXT3}; font-size:10px; font-weight:600; background:transparent; border:none;")
-            lbl_v = QLabel(val)
-            clr_val = "#a78bfa" if title == "Satisfaction" and val != "—" else clr
-            lbl_v.setStyleSheet(f"color:{clr_val}; font-size:{'13px' if title=='Satisfaction' else '18px'}; font-weight:800; background:transparent; border:none;")
-            cbox.addWidget(lbl_t)
-            cbox.addWidget(lbl_v)
-            if sub:
-                lbl_s = QLabel(sub)
-                lbl_s.setStyleSheet(f"color:{_TXT3}; font-size:9px; background:transparent; border:none;")
-                cbox.addWidget(lbl_s)
-            kpi_hbox.addWidget(card)
-        main_lay.addWidget(kpi_row)
+        inner = QWidget()
+        inner.setStyleSheet(f"background:{_BG_DEEP};")
+        lay   = QVBoxLayout(inner)
+        lay.setContentsMargins(16, 14, 16, 16)
+        lay.setSpacing(12)
 
-        # ── Barre service/motif ───────────────────────────────────────────────
-        if stats["top_service"] or stats["top_motif"]:
-            info_bar = QFrame()
-            info_bar.setStyleSheet(
-                f"background:{_BG_HDR}; border-top:1px solid {_BORDER}; border-bottom:1px solid {_BORDER};"
-            )
-            ib_lay = QHBoxLayout(info_bar)
-            ib_lay.setContentsMargins(16, 7, 16, 7)
-            ib_lay.setSpacing(20)
+        # KPI ligne 1 — chiffres clés
+        avg_w = self._fmt_wait(stats["avg_wait"]) if stats["avg_wait"] else "—"
+        sat_s = self._stars(stats["avg_sat"])      if stats["avg_sat"]  else "—"
+        sat_b = f"{stats['avg_sat']:.1f} / 5"     if stats["avg_sat"]  else "Aucune note"
 
-            def _pill(icon: str, label: str, val: str, clr: str) -> QFrame:
-                f = QFrame()
-                f.setStyleSheet(f"background:transparent; border:none;")
-                fl = QHBoxLayout(f)
-                fl.setContentsMargins(0, 0, 0, 0)
-                fl.setSpacing(6)
-                ic = QLabel(icon)
-                ic.setStyleSheet("background:transparent; border:none; font-size:13px;")
-                lbl_l = QLabel(f"{label} :")
-                lbl_l.setStyleSheet(f"color:{_TXT3}; font-size:10px; font-weight:600; background:transparent; border:none;")
-                lbl_v = QLabel(val)
-                lbl_v.setStyleSheet(f"color:{clr}; font-size:11px; font-weight:700; background:transparent; border:none;")
-                fl.addWidget(ic); fl.addWidget(lbl_l); fl.addWidget(lbl_v)
-                return f
+        row1 = QHBoxLayout()
+        row1.setSpacing(8)
+        for icon, title, val, sub, clr in [
+            ("🗓", "Visites totales",  str(len(stats["visites"])),   "",     _C_NAVY),
+            ("✅", "Traités",           str(stats["nb_traite"]),       "",     _C_GREEN),
+            ("⏳", "En attente",        str(stats["nb_attente"]),      "",     _C_AMBER),
+            ("❌", "Non traités",       str(stats["nb_non_traite"]),   "",     "#ef4444"),
+            ("⌚", "Attente moy.",      avg_w,                         "",     _C_BLUE),
+            ("⭐", "Satisfaction moy.", sat_s,                         sat_b,  "#7c3aed"),
+        ]:
+            row1.addWidget(self._kpi_card(icon, title, val, sub, clr))
+        lay.addLayout(row1)
 
-            if stats["top_service"]:
-                ib_lay.addWidget(_pill("📋", "Service principal", stats["top_service"], _C_BLUE))
-            if stats["top_motif"]:
-                ib_lay.addWidget(_pill("💬", "Motif principal", stats["top_motif"], _C_AMBER))
-            ib_lay.addStretch(1)
-            main_lay.addWidget(info_bar)
+        # KPI ligne 2 — temporel
+        jd     = stats["jours_depuis"]
+        jd_str = f"{jd} jours" if jd is not None else "—"
+        ai_str = f"{int(stats['avg_interval'])} jours" if stats["avg_interval"] else "—"
+        jd_clr = "#ef4444" if (jd or 0) > 90 else (_C_AMBER if (jd or 0) > 30 else _C_GREEN)
 
-        # ── Historique ────────────────────────────────────────────────────────
-        hist_hdr = QLabel("  📅  Historique des visites")
-        hist_hdr.setStyleSheet(
-            f"background:{_BG_HDR}; color:{_TXT1}; font-size:12px; font-weight:700;"
-            f" padding:9px 16px; border-bottom:1px solid {_BORDER};"
+        row2 = QHBoxLayout()
+        row2.setSpacing(8)
+        for icon, title, val, sub, clr in [
+            ("📅", "1ère visite",      stats["premiere_visite"], "", _TXT2),
+            ("📅", "Dernière visite",  stats["derniere_visite"],  "", _TXT2),
+            ("⏱",  "Depuis dernière", jd_str,                    "", jd_clr),
+            ("🔄", "Intervalle moy.", ai_str,                    "", _C_BLUE),
+            ("📍", "Jour préféré",    stats["jour_prefere"],     "", _C_GREEN),
+            ("🕐", "Heure préférée",  stats["heure_preferee"],   "", _C_GREEN),
+        ]:
+            row2.addWidget(self._kpi_card(icon, title, val, sub, clr))
+        lay.addLayout(row2)
+
+        # Barre infos : service principal · motif · attente min/max
+        info_bar = QFrame()
+        info_bar.setStyleSheet(
+            f"background:{_BG_HDR}; border-radius:10px; border:1px solid {_BORDER};"
         )
-        main_lay.addWidget(hist_hdr)
+        ib_lay = QHBoxLayout(info_bar)
+        ib_lay.setContentsMargins(16, 10, 16, 10)
+        ib_lay.setSpacing(24)
 
+        def _pill(icon: str, lbl: str, val: str, clr: str) -> QFrame:
+            f  = QFrame()
+            f.setStyleSheet("background:transparent; border:none;")
+            fl = QHBoxLayout(f)
+            fl.setContentsMargins(0, 0, 0, 0)
+            fl.setSpacing(5)
+            for text, style in [
+                (icon, f"font-size:13px; color:{_TXT2};"),
+                (f"{lbl} :", f"color:{_TXT3}; font-size:10px; font-weight:600;"),
+                (val,  f"color:{clr}; font-size:11px; font-weight:700;"),
+            ]:
+                lb = QLabel(text)
+                lb.setStyleSheet(f"background:transparent; border:none; {style}")
+                fl.addWidget(lb)
+            return f
+
+        if stats["top_service"]:
+            ib_lay.addWidget(_pill("📋", "Service principal", stats["top_service"], _C_BLUE))
+        if stats["top_motif"]:
+            ib_lay.addWidget(_pill("💬", "Motif principal", stats["top_motif"], _C_AMBER))
+        if stats["min_wait"]:
+            ib_lay.addWidget(_pill("⬇", "Attente min", self._fmt_wait(stats["min_wait"]), _C_GREEN))
+        if stats["max_wait"]:
+            ib_lay.addWidget(_pill("⬆", "Attente max", self._fmt_wait(stats["max_wait"]), "#ef4444"))
+        ib_lay.addStretch(1)
+        lay.addWidget(info_bar)
+
+        # Distribution satisfaction
+        if stats["sat_dist"]:
+            sat_frame = QFrame()
+            sat_frame.setStyleSheet(
+                f"background:{_BG_CARD}; border-radius:10px; border:1px solid {_BORDER};"
+            )
+            sf_lay = QVBoxLayout(sat_frame)
+            sf_lay.setContentsMargins(16, 12, 16, 12)
+            sf_lay.setSpacing(7)
+            lbl_st = QLabel("Répartition de la satisfaction")
+            lbl_st.setStyleSheet(
+                f"color:{_TXT2}; font-size:11px; font-weight:700; background:transparent; border:none;"
+            )
+            sf_lay.addWidget(lbl_st)
+            total_sat = sum(stats["sat_dist"].values())
+            for star in range(5, 0, -1):
+                cnt   = stats["sat_dist"].get(star, 0)
+                pct   = cnt / total_sat if total_sat else 0
+                bar_w = int(pct * 20)
+                clr   = _C_GREEN if star >= 4 else (_C_AMBER if star >= 3 else "#ef4444")
+                sr    = QHBoxLayout()
+                sr.setSpacing(8)
+                l_star = QLabel("★" * star + "☆" * (5 - star))
+                l_star.setStyleSheet(
+                    f"color:{clr}; font-size:11px; min-width:80px; background:transparent; border:none;"
+                )
+                l_bar  = QLabel("█" * bar_w + "░" * (20 - bar_w))
+                l_bar.setStyleSheet(
+                    f"color:{clr}; font-family:monospace; font-size:10px; background:transparent; border:none;"
+                )
+                l_cnt  = QLabel(f"{cnt}  ({pct*100:.0f}%)")
+                l_cnt.setStyleSheet(
+                    f"color:{_TXT3}; font-size:10px; background:transparent; border:none;"
+                )
+                sr.addWidget(l_star)
+                sr.addWidget(l_bar, 1)
+                sr.addWidget(l_cnt)
+                sf_lay.addLayout(sr)
+            lay.addWidget(sat_frame)
+
+        lay.addStretch(1)
+        scroll.setWidget(inner)
+        return scroll
+
+    # ── Onglet 2 : Historique complet ─────────────────────────────────────────
+    def _build_tab_history(self, stats: dict) -> QWidget:
+        from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView
+
+        container = QWidget()
+        container.setStyleSheet(f"background:{_BG_DEEP};")
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        # Barre recherche
+        sb = QFrame()
+        sb.setStyleSheet(
+            f"background:{_BG_HDR}; border-bottom:1px solid {_BORDER};"
+        )
+        sb_lay = QHBoxLayout(sb)
+        sb_lay.setContentsMargins(14, 8, 14, 8)
+        sb_lay.setSpacing(8)
+        lbl_ico = QLabel("🔍")
+        lbl_ico.setStyleSheet("background:transparent; border:none;")
+        sb_lay.addWidget(lbl_ico)
+        self._hist_search = QLineEdit()
+        self._hist_search.setPlaceholderText("Filtrer par date, service, motif, statut, priorité…")
+        self._hist_search.setClearButtonEnabled(True)
+        self._hist_search.setStyleSheet(f"""
+            QLineEdit {{
+                background:#0f172a; color:{_TXT1}; border:1px solid {_BORDER};
+                border-radius:7px; padding:5px 10px; font-size:12px;
+            }}
+            QLineEdit:focus {{ border-color:{_C_NAVY}; }}
+        """)
+        self._hist_search.textChanged.connect(self._filter_history)
+        sb_lay.addWidget(self._hist_search)
+        self._lbl_hist_count = QLabel(f"{len(stats['visites'])} visite(s)")
+        self._lbl_hist_count.setStyleSheet(
+            f"color:{_TXT3}; font-size:10px; min-width:90px; background:transparent; border:none;"
+        )
+        sb_lay.addWidget(self._lbl_hist_count)
+        lay.addWidget(sb)
+
+        # Table historique
         _H_COLS = ["Date", "Service", "Motif", "Priorité", "Statut",
-                   "Attente", "Satisfaction ★", "Heure"]
-        hist_tbl = QTableWidget(len(stats["visites"]), len(_H_COLS))
-        hist_tbl.setHorizontalHeaderLabels(_H_COLS)
-        hist_tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        hist_tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        hist_tbl.setAlternatingRowColors(True)
-        hist_tbl.verticalHeader().setVisible(False)
-        hist_tbl.setShowGrid(False)
-        hist_tbl.setStyleSheet(f"""
+                   "Attente", "Satisfaction", "Heure d'arrivée"]
+        self._hist_tbl = QTableWidget(0, len(_H_COLS))
+        self._hist_tbl.setHorizontalHeaderLabels(_H_COLS)
+        self._hist_tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._hist_tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._hist_tbl.setAlternatingRowColors(True)
+        self._hist_tbl.verticalHeader().setVisible(False)
+        self._hist_tbl.setShowGrid(False)
+        self._hist_tbl.setStyleSheet(f"""
             QTableWidget {{
                 background:{_BG_CARD}; alternate-background-color:#111827;
                 color:{_TXT1}; border:none; font-size:11px;
@@ -507,113 +874,301 @@ class _UserDetailDialog(QDialog):
                 border-bottom:2px solid {_C_NAVY}; padding:6px 10px;
             }}
             QTableWidget::item {{
-                padding:5px 10px;
-                border-bottom:1px solid {_BORDER};
+                padding:5px 10px; border-bottom:1px solid {_BORDER};
             }}
             QTableWidget::item:selected {{ background:{_C_NAVY}; color:white; }}
         """)
-
-        _STATUT_ICON = {"traite": "✅ Traité", "en_attente": "⏳ En attente", "non_traite": "❌ Non traité"}
-        _STATUT_CLR  = {"traite": _C_GREEN,    "en_attente": _C_AMBER,         "non_traite": "#ef4444"}
-        _PRIO_ICON   = {"haute": "🔴 Haute", "moyenne": "🟡 Moyenne", "normale": "🟢 Normale"}
-        _PRIO_CLR    = {"haute": "#ef4444",  "moyenne": _C_AMBER,      "normale": _C_GREEN}
-
-        hist_tbl.setRowHeight(0, 36)
-        for r, v in enumerate(stats["visites"]):
-            hist_tbl.setRowHeight(r, 36)
-            sat_raw  = v.get("satisfaction") or ""
-            sat_disp = ("★" * int(sat_raw) + "☆" * (5 - int(sat_raw)) if str(sat_raw).isdigit() else "—")
-            statut   = str(v.get("statut") or "")
-            priorite = str(v.get("priorite") or "")
-
-            row_vals = [
-                (v.get("date", ""),                              Qt.AlignmentFlag.AlignCenter),
-                (v.get("service", "—"),                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-                (v.get("motif",   "—"),                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-                (_PRIO_ICON.get(priorite, priorite or "—"),     Qt.AlignmentFlag.AlignCenter),
-                (_STATUT_ICON.get(statut,  statut  or "—"),     Qt.AlignmentFlag.AlignCenter),
-                (v.get("temps_attente", "—"),                   Qt.AlignmentFlag.AlignCenter),
-                (sat_disp,                                      Qt.AlignmentFlag.AlignCenter),
-                (v.get("heure_arrivee", ""),                    Qt.AlignmentFlag.AlignCenter),
-            ]
-            for c, (val, align) in enumerate(row_vals):
-                item = QTableWidgetItem(str(val))
-                item.setTextAlignment(int(align))
-                if c == 4:
-                    item.setForeground(QColor(_STATUT_CLR.get(statut, _TXT2)))
-                if c == 3:
-                    item.setForeground(QColor(_PRIO_CLR.get(priorite, _TXT2)))
-                if c == 6 and sat_raw:
-                    nb_stars = int(sat_raw) if str(sat_raw).isdigit() else 0
-                    item.setForeground(QColor(_C_GREEN if nb_stars >= 4 else (_C_AMBER if nb_stars >= 3 else "#ef4444")))
-                hist_tbl.setItem(r, c, item)
-
-        h = hist_tbl.horizontalHeader()
+        h = self._hist_tbl.horizontalHeader()
         h.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         h.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         h.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         for ci in range(3, len(_H_COLS)):
             h.setSectionResizeMode(ci, QHeaderView.ResizeMode.ResizeToContents)
 
-        main_lay.addWidget(hist_tbl)
+        self._hist_all_rows = stats["visites"]
+        self._fill_history(stats["visites"])
+        lay.addWidget(self._hist_tbl)
+        return container
 
-    def _load_user_stats(self) -> dict:
-        """Charge toutes les visites et statistiques pour cet usager."""
-        u = self._user
-        try:
-            if u["cnps"]:
-                where = "WHERE TRIM(numero_cnps) = ?"
-                bind  = (u["cnps"],)
-            else:
-                where = "WHERE UPPER(TRIM(nom)) = ? AND TRIM(prenom) = ?"
-                bind  = (u["nom"], u["prenom"])
+    def _fill_history(self, rows: list) -> None:
+        from PyQt6.QtWidgets import QTableWidgetItem
 
-            rows = db.execute_query(
-                f"""SELECT d.date, s.nom AS service, m.nom AS motif,
-                           d.priorite, d.statut, d.temps_attente,
-                           d.satisfaction, d.heure_arrivee
-                    FROM accueil_demandeaccueil d
-                    LEFT JOIN accueil_service s ON d.service_demande_id = s.id
-                    LEFT JOIN accueil_motif   m ON d.motif_id = m.id
-                    {where}
-                    ORDER BY d.date DESC, d.heure_arrivee DESC""",
-                bind,
+        _SI = {"traite": "✅ Traité", "en_attente": "⏳ En attente", "non_traite": "❌ Non traité"}
+        _SC = {"traite": _C_GREEN,    "en_attente": _C_AMBER,         "non_traite": "#ef4444"}
+        _PI = {"haute": "🔴 Haute",   "moyenne": "🟡 Moyenne",        "normale": "🟢 Normale"}
+        _PC = {"haute": "#ef4444",    "moyenne": _C_AMBER,             "normale": _C_GREEN}
+
+        self._hist_tbl.setRowCount(len(rows))
+        for r, v in enumerate(rows):
+            self._hist_tbl.setRowHeight(r, 36)
+            sat_raw  = v.get("satisfaction") or ""
+            sat_disp = (
+                "★" * int(sat_raw) + "☆" * (5 - int(sat_raw))
+                if str(sat_raw).isdigit() else "—"
             )
+            statut   = str(v.get("statut")   or "")
+            priorite = str(v.get("priorite") or "")
+            row_vals = [
+                (str(v.get("date", ""))[:10],               Qt.AlignmentFlag.AlignCenter),
+                (v.get("service", "—"),                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                (v.get("motif",   "—"),                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                (_PI.get(priorite, priorite or "—"),        Qt.AlignmentFlag.AlignCenter),
+                (_SI.get(statut,   statut   or "—"),        Qt.AlignmentFlag.AlignCenter),
+                (str(v.get("temps_attente") or "—"),        Qt.AlignmentFlag.AlignCenter),
+                (sat_disp,                                  Qt.AlignmentFlag.AlignCenter),
+                (str(v.get("heure_arrivee") or "—"),        Qt.AlignmentFlag.AlignCenter),
+            ]
+            for c, (val, align) in enumerate(row_vals):
+                item = QTableWidgetItem(str(val))
+                item.setTextAlignment(int(align))
+                if c == 4: item.setForeground(QColor(_SC.get(statut,   _TXT2)))
+                if c == 3: item.setForeground(QColor(_PC.get(priorite, _TXT2)))
+                if c == 6 and str(sat_raw).isdigit():
+                    ns = int(sat_raw)
+                    item.setForeground(
+                        QColor(_C_GREEN if ns >= 4 else (_C_AMBER if ns >= 3 else "#ef4444"))
+                    )
+                self._hist_tbl.setItem(r, c, item)
+        self._lbl_hist_count.setText(f"{len(rows)} visite(s)")
 
-            nb_traite  = sum(1 for r in rows if (r.get("statut") or "") == "traite")
-            nb_attente = sum(1 for r in rows if (r.get("statut") or "") in ("en_attente", "non_traite"))
+    def _filter_history(self, text: str) -> None:
+        q = text.strip().lower()
+        if not q:
+            self._fill_history(self._hist_all_rows)
+            return
+        filtered = [
+            r for r in self._hist_all_rows
+            if q in " ".join(str(v) for v in r.values() if v is not None).lower()
+        ]
+        self._fill_history(filtered)
 
-            def _to_min(t):
-                if not t: return None
-                try:
-                    h, m = int(t[:2]), int(t[3:5])
-                    return h * 60 + m
-                except Exception:
-                    return None
+    # ── Onglet 3 : Analyse IA ─────────────────────────────────────────────────
+    def _build_tab_ia(self, stats: dict) -> QWidget:
+        from PyQt6.QtWidgets import QScrollArea, QProgressBar
 
-            waits = [w for w in (_to_min(r.get("temps_attente")) for r in rows) if w is not None]
-            avg_wait = sum(waits) / len(waits) if waits else 0.0
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border:none; background:transparent; }")
 
-            sats = [int(r["satisfaction"]) for r in rows
-                    if r.get("satisfaction") and str(r["satisfaction"]).isdigit()]
-            avg_sat = sum(sats) / len(sats) if sats else 0.0
+        inner = QWidget()
+        inner.setStyleSheet(f"background:{_BG_DEEP};")
+        lay   = QVBoxLayout(inner)
+        lay.setContentsMargins(16, 14, 16, 16)
+        lay.setSpacing(14)
 
-            from collections import Counter
-            svc_cnt = Counter(r.get("service") or "" for r in rows if r.get("service"))
-            mot_cnt = Counter(r.get("motif")   or "" for r in rows if r.get("motif"))
+        # ── Score de fidélité RFM ──────────────────────────────────────────
+        sc     = stats["score_fidelite"]
+        sc_clr = _C_GREEN if sc >= 70 else (_C_AMBER if sc >= 40 else "#ef4444")
+        sc_lbl = ("Excellent" if sc >= 80 else "Bon" if sc >= 60
+                  else "Moyen" if sc >= 40 else "Faible")
 
-            return {
-                "visites":     rows,
-                "nb_traite":   nb_traite,
-                "nb_attente":  nb_attente,
-                "avg_wait":    avg_wait,
-                "avg_sat":     avg_sat,
-                "top_service": svc_cnt.most_common(1)[0][0] if svc_cnt else "",
-                "top_motif":   mot_cnt.most_common(1)[0][0] if mot_cnt else "",
-            }
-        except Exception:
-            return {"visites": [], "nb_traite": 0, "nb_attente": 0,
-                    "avg_wait": 0.0, "avg_sat": 0.0, "top_service": "", "top_motif": ""}
+        fid = QFrame()
+        fid.setStyleSheet(
+            f"background:{_BG_CARD}; border-radius:12px;"
+            f" border:1px solid {_BORDER}; border-left:4px solid {sc_clr};"
+        )
+        fid_lay = QVBoxLayout(fid)
+        fid_lay.setContentsMargins(16, 14, 16, 14)
+        fid_lay.setSpacing(10)
+
+        top_row = QHBoxLayout()
+        lbl_fid_t = QLabel("Score de fidélité  —  modèle RFM")
+        lbl_fid_t.setStyleSheet(
+            f"color:{_TXT1}; font-size:13px; font-weight:700; background:transparent; border:none;"
+        )
+        lbl_fid_d = QLabel("Récence · Fréquence · Satisfaction")
+        lbl_fid_d.setStyleSheet(
+            f"color:{_TXT3}; font-size:10px; background:transparent; border:none;"
+        )
+        lbl_fid_s = QLabel(f"{sc} / 100  —  {sc_lbl}")
+        lbl_fid_s.setStyleSheet(
+            f"color:{sc_clr}; font-size:14px; font-weight:800; background:transparent; border:none;"
+        )
+        top_row.addWidget(lbl_fid_t)
+        top_row.addWidget(lbl_fid_d)
+        top_row.addStretch(1)
+        top_row.addWidget(lbl_fid_s)
+        fid_lay.addLayout(top_row)
+
+        pb_main = QProgressBar()
+        pb_main.setRange(0, 100)
+        pb_main.setValue(sc)
+        pb_main.setTextVisible(False)
+        pb_main.setFixedHeight(14)
+        pb_main.setStyleSheet(f"""
+            QProgressBar {{ background:#1e293b; border-radius:7px; border:none; }}
+            QProgressBar::chunk {{ background:{sc_clr}; border-radius:7px; }}
+        """)
+        fid_lay.addWidget(pb_main)
+
+        # Composantes RFM
+        freq_sc = min(40, len(stats["visites"]) * 2)
+        sat_sc  = int(stats["avg_sat"] / 5 * 20) if stats["avg_sat"] else 0
+        rec_sc  = max(0, sc - freq_sc - sat_sc)
+        comp_row = QHBoxLayout()
+        comp_row.setSpacing(8)
+        for lbl_c, val_c, mx_c, clr_c in [
+            ("Fréquence (F)", freq_sc, 40, _C_BLUE),
+            ("Récence (R)",   rec_sc,  40, _C_GREEN),
+            ("Satisfaction",  sat_sc,  20, "#7c3aed"),
+        ]:
+            cf  = QFrame()
+            cf.setStyleSheet(f"background:{_BG_HDR}; border-radius:8px; border:none;")
+            cfl = QVBoxLayout(cf)
+            cfl.setContentsMargins(10, 8, 10, 8)
+            cfl.setSpacing(4)
+            lbl_comp = QLabel(lbl_c)
+            lbl_comp.setStyleSheet(
+                f"color:{_TXT3}; font-size:9px; background:transparent; border:none;"
+            )
+            pb2 = QProgressBar()
+            pb2.setRange(0, mx_c)
+            pb2.setValue(max(0, val_c))
+            pb2.setTextVisible(False)
+            pb2.setFixedHeight(8)
+            pb2.setStyleSheet(f"""
+                QProgressBar {{ background:#0f172a; border-radius:4px; border:none; }}
+                QProgressBar::chunk {{ background:{clr_c}; border-radius:4px; }}
+            """)
+            lbl_val = QLabel(f"{max(0, val_c)} / {mx_c}")
+            lbl_val.setStyleSheet(
+                f"color:{clr_c}; font-size:10px; font-weight:700; background:transparent; border:none;"
+            )
+            cfl.addWidget(lbl_comp)
+            cfl.addWidget(pb2)
+            cfl.addWidget(lbl_val)
+            comp_row.addWidget(cf)
+        fid_lay.addLayout(comp_row)
+        lay.addWidget(fid)
+
+        # ── Risque d'abandon + Prochaine visite ────────────────────────────
+        risk_row = QHBoxLayout()
+        risk_row.setSpacing(10)
+
+        risque = stats["risque_abandon"]
+        r_clr  = {"faible": _C_GREEN, "moyen": _C_AMBER,
+                   "élevé": "#ef4444", "inconnu": _TXT3}[risque]
+        r_icon = {"faible": "🟢", "moyen": "🟡",
+                   "élevé": "🔴", "inconnu": "⚪"}[risque]
+        r_desc = {
+            "faible":  "L'usager revient régulièrement. Aucune action requise.",
+            "moyen":   "Retard par rapport à son intervalle habituel. Surveillance recommandée.",
+            "élevé":   "Absence prolongée détectée. Risque de non-retour élevé.",
+            "inconnu": "Données insuffisantes pour évaluer le risque.",
+        }[risque]
+
+        risk_fr = QFrame()
+        risk_fr.setStyleSheet(
+            f"background:{_BG_CARD}; border-radius:12px; border:1px solid {r_clr};"
+        )
+        rfl = QVBoxLayout(risk_fr)
+        rfl.setContentsMargins(16, 12, 16, 12)
+        rfl.setSpacing(6)
+        lbl_rt = QLabel(f"{r_icon}  Risque d'abandon : {risque.upper()}")
+        lbl_rt.setStyleSheet(
+            f"color:{r_clr}; font-size:13px; font-weight:700; background:transparent; border:none;"
+        )
+        lbl_rd = QLabel(r_desc)
+        lbl_rd.setStyleSheet(
+            f"color:{_TXT2}; font-size:11px; background:transparent; border:none;"
+        )
+        lbl_rd.setWordWrap(True)
+        rfl.addWidget(lbl_rt)
+        rfl.addWidget(lbl_rd)
+        risk_row.addWidget(risk_fr, 1)
+
+        nv_fr  = QFrame()
+        nv_fr.setStyleSheet(
+            f"background:{_BG_CARD}; border-radius:12px; border:1px solid {_BORDER};"
+        )
+        nvl = QVBoxLayout(nv_fr)
+        nvl.setContentsMargins(16, 12, 16, 12)
+        nvl.setSpacing(4)
+        lbl_nvt = QLabel("Prochaine visite estimée")
+        lbl_nvt.setStyleSheet(
+            f"color:{_TXT3}; font-size:11px; font-weight:600; background:transparent; border:none;"
+        )
+        nv_clr  = "#ef4444" if stats.get("est_en_retard") else _C_BLUE
+        lbl_nvv = QLabel(stats["prochaine_visite"])
+        lbl_nvv.setStyleSheet(
+            f"color:{nv_clr}; font-size:18px; font-weight:800; background:transparent; border:none;"
+        )
+        nv_note = (
+            "En retard / date dépassée"
+            if stats.get("est_en_retard") else
+            ("Basé sur l'intervalle moyen entre visites"
+             if stats["prochaine_visite"] != "—" else
+             "Données insuffisantes (moins de 2 visites)")
+        )
+        lbl_nvn = QLabel(nv_note)
+        lbl_nvn.setStyleSheet(
+            f"color:{_TXT3}; font-size:9px; font-style:italic; background:transparent; border:none;"
+        )
+        nvl.addWidget(lbl_nvt)
+        nvl.addWidget(lbl_nvv)
+        nvl.addWidget(lbl_nvn)
+        risk_row.addWidget(nv_fr)
+        lay.addLayout(risk_row)
+
+        # ── Tendance satisfaction ──────────────────────────────────────────
+        tend      = stats["tendance"]
+        tend_icon = {"hausse": "📈", "baisse": "📉", "stable": "➡️"}[tend]
+        tend_clr  = {"hausse": _C_GREEN, "baisse": "#ef4444", "stable": _C_AMBER}[tend]
+        tend_desc = {
+            "hausse": "La satisfaction s'améliore sur les 5 dernières visites.",
+            "baisse": "La satisfaction baisse. Vigilance sur la qualité du service.",
+            "stable": "La satisfaction reste stable dans le temps.",
+        }[tend]
+
+        tend_fr = QFrame()
+        tend_fr.setStyleSheet(
+            f"background:{_BG_CARD}; border-radius:12px;"
+            f" border:1px solid {_BORDER}; border-left:4px solid {tend_clr};"
+        )
+        tfl = QHBoxLayout(tend_fr)
+        tfl.setContentsMargins(16, 12, 16, 12)
+        tfl.setSpacing(12)
+        lbl_ti = QLabel(tend_icon)
+        lbl_ti.setStyleSheet("font-size:26px; background:transparent; border:none;")
+        t_col = QVBoxLayout()
+        t_col.setSpacing(2)
+        lbl_tt = QLabel("Tendance satisfaction (5 dernières visites)")
+        lbl_tt.setStyleSheet(
+            f"color:{_TXT2}; font-size:11px; font-weight:700; background:transparent; border:none;"
+        )
+        lbl_tv = QLabel(tend.capitalize())
+        lbl_tv.setStyleSheet(
+            f"color:{tend_clr}; font-size:14px; font-weight:800; background:transparent; border:none;"
+        )
+        lbl_td = QLabel(tend_desc)
+        lbl_td.setStyleSheet(
+            f"color:{_TXT3}; font-size:10px; background:transparent; border:none;"
+        )
+        lbl_td.setWordWrap(True)
+        t_col.addWidget(lbl_tt)
+        t_col.addWidget(lbl_tv)
+        t_col.addWidget(lbl_td)
+        tfl.addWidget(lbl_ti)
+        tfl.addLayout(t_col, 1)
+        lay.addWidget(tend_fr)
+
+        # ── Répartition services / motifs ──────────────────────────────────
+        charts_row = QHBoxLayout()
+        charts_row.setSpacing(10)
+        if stats["svc_cnt"]:
+            charts_row.addWidget(
+                self._mini_bar_chart("Répartition par service", stats["svc_cnt"], _C_BLUE)
+            )
+        if stats["mot_cnt"]:
+            charts_row.addWidget(
+                self._mini_bar_chart("Répartition par motif", stats["mot_cnt"], _C_AMBER)
+            )
+        if stats["svc_cnt"] or stats["mot_cnt"]:
+            lay.addLayout(charts_row)
+
+        lay.addStretch(1)
+        scroll.setWidget(inner)
+        return scroll
 
 
 # ── Tableau usagers fréquents ─────────────────────────────────────────────────
@@ -631,7 +1186,8 @@ class _TopUsersFrame(QFrame):
 
     def __init__(self, users: list[dict], parent=None) -> None:
         super().__init__(parent)
-        self._users      = users
+        self._all_users  = users          # liste complète (jamais modifiée)
+        self._users      = users          # liste courante (filtrée ou complète)
         self._page       = 0
         self._max_visits = users[0]["nb_visites"] if users else 1
         self._total_pg   = max(1, -(-len(users) // self._PAGE_SIZE))
@@ -684,6 +1240,39 @@ class _TopUsersFrame(QFrame):
         )
         hdr_lay.addWidget(hint)
         root.addWidget(hdr_card)
+
+        # ── Barre de recherche ────────────────────────────────────────────────
+        search_bar = QFrame()
+        search_bar.setStyleSheet(
+            f"background:{_BG_HDR}; border:none; border-bottom:1px solid {_BORDER};"
+        )
+        search_lay = QHBoxLayout(search_bar)
+        search_lay.setContentsMargins(14, 8, 14, 8)
+        search_lay.setSpacing(8)
+
+        lbl_search_icon = QLabel("🔍")
+        lbl_search_icon.setStyleSheet("background:transparent; border:none; font-size:13px;")
+        search_lay.addWidget(lbl_search_icon)
+
+        self._search_box = QLineEdit()
+        self._search_box.setPlaceholderText("Rechercher par nom, prénom, N° CNPS ou contact…")
+        self._search_box.setClearButtonEnabled(True)
+        self._search_box.setStyleSheet(f"""
+            QLineEdit {{
+                background:#0f172a; color:{_TXT1}; border:1px solid {_BORDER};
+                border-radius:7px; padding:5px 10px; font-size:12px;
+            }}
+            QLineEdit:focus {{ border-color:{_C_NAVY}; }}
+        """)
+        self._search_box.textChanged.connect(self._on_search)
+        search_lay.addWidget(self._search_box)
+
+        self._lbl_search_result = QLabel("")
+        self._lbl_search_result.setStyleSheet(
+            f"color:{_TXT3}; font-size:10px; background:transparent; border:none;"
+        )
+        search_lay.addWidget(self._lbl_search_result)
+        root.addWidget(search_bar)
 
         if not users:
             lbl_empty = QLabel("Aucune donnée disponible sur cette période.")
@@ -787,6 +1376,28 @@ class _TopUsersFrame(QFrame):
         nav_hbox.addWidget(self._btn_last)
         root.addWidget(nav_bar)
 
+        self._render_page(0)
+
+    # ── recherche ─────────────────────────────────────────────────────────────
+    def _on_search(self, text: str) -> None:
+        q = text.strip().lower()
+        if q:
+            self._users = [
+                u for u in self._all_users
+                if q in (u.get("nom") or "").lower()
+                or q in (u.get("prenom") or "").lower()
+                or q in (u.get("cnps") or "").lower()
+                or q in (u.get("contact") or "").lower()
+            ]
+            n = len(self._users)
+            self._lbl_search_result.setText(
+                f"{n} résultat{'s' if n > 1 else ''}" if n else "Aucun résultat"
+            )
+        else:
+            self._users = self._all_users
+            self._lbl_search_result.setText("")
+
+        self._total_pg = max(1, -(-len(self._users) // self._PAGE_SIZE))
         self._render_page(0)
 
     # ── navigation ────────────────────────────────────────────────────────────
@@ -1120,7 +1731,10 @@ class _ChartHandler:
             de = QDateEdit()
             de.setCalendarPopup(True)
             de.setDisplayFormat("dd/MM/yyyy")
-            de.setStyleSheet(_DATE_EDIT_QSS)
+            de.setStyleSheet(
+                _DATE_EDIT_QSS +
+                f"QDateEdit::drop-down {{ image: url({_CAL_ICON_DASHBOARD}); width: 16px; height: 16px; }}"
+            )
             de.setDate(QDate.fromString(val, "yyyy-MM-dd"))
             return de
 
