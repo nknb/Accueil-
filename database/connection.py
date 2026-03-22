@@ -100,17 +100,14 @@ class DatabaseConnection:
 
     # ── Helpers statiques ─────────────────────────────────────────────────────
 
-    @staticmethod
-    def _has_table(db_path: Path, table_name: str) -> bool:
+    def _has_table(self, db_path: Path, table_name: str) -> bool:
+        """Vérifie l'existence d'une table via la connexion gérée (sans rouvrir)."""
         try:
-            conn = sqlite3.connect(str(db_path), timeout=5)
-            cur = conn.execute(
+            rows = self.execute_query(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
                 (table_name,),
             )
-            row = cur.fetchone()
-            conn.close()
-            return row is not None
+            return len(rows) > 0
         except Exception:
             return False
 

@@ -597,30 +597,30 @@ class Utilisateur:
     
     @staticmethod
     def hash_password(password: str) -> str:
-        """Hash sécurisé du mot de passe (PBKDF2)"""
-        salt = os.urandom(32).hex()
-        iterations = 100000
-        hash_obj = hashlib.pbkdf2_hmac(
-            'sha256',
-            password.encode('utf-8'),
-            salt.encode('utf-8'),
-            iterations
-        )
-        return f"{salt}${iterations}${hash_obj.hex()}"
-    
+        """Hash sécurisé du mot de passe (bcrypt, cohérent avec password_manager.py)."""
+        try:
+            from utils.password_manager import PasswordManager
+            return PasswordManager.hash_password(password)
+        except Exception:
+            # Fallback PBKDF2 si bcrypt indisponible
+            salt = os.urandom(32).hex()
+            iterations = 100_000
+            h = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), iterations)
+            return f"{salt}${iterations}${h.hex()}"
+
     @staticmethod
     def verify_password(password: str, password_hash: str) -> bool:
-        """Vérifie le mot de passe"""
+        """Vérifie le mot de passe (bcrypt ou PBKDF2 legacy)."""
         try:
+            if password_hash.startswith(("$2b$", "$2a$", "$2y$")):
+                from utils.password_manager import PasswordManager
+                return PasswordManager.verify_password(password, password_hash)
+            # Format PBKDF2 legacy : salt$iterations$hash
             salt, iterations, hash_hex = password_hash.split('$')
-            iterations = int(iterations)
-            hash_obj = hashlib.pbkdf2_hmac(
-                'sha256',
-                password.encode('utf-8'),
-                salt.encode('utf-8'),
-                iterations
+            h = hashlib.pbkdf2_hmac(
+                'sha256', password.encode(), salt.encode(), int(iterations)
             )
-            return hash_obj.hex() == hash_hex
+            return h.hex() == hash_hex
         except Exception as e:
             print(f"Erreur vérification mot de passe: {e}")
             return False

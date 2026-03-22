@@ -19,6 +19,10 @@ from widgets import AccueilPage, DashboardPage, PreAccueilPage, DatabasePage, Us
 from database.connection import db
 from utils import app_logger
 
+_PAGE_SEARCH  = 5   # Index page recherche globale (hors vues principales)
+_PAGE_PROFILE = 6   # Index page profil utilisateur
+
+
 class MainWindow(QMainWindow):
     """Fenêtre principale avec gestion des rôles et permissions
     
@@ -279,7 +283,7 @@ class MainWindow(QMainWindow):
     ## Function for searching
     def on_search_btn_clicked(self):
         """Déclenche la recherche et affiche les résultats"""
-        self.ui.stackedWidget.setCurrentIndex(5)
+        self.ui.stackedWidget.setCurrentIndex(_PAGE_SEARCH)
         search_text = self.ui.search_input.text().strip()
         if search_text:
             self.ui.label_9.setText(f"Résultats pour: {search_text}")
@@ -288,7 +292,7 @@ class MainWindow(QMainWindow):
     ## Function for changing page to user page
     def on_user_btn_clicked(self):
         """Bascule vers la page profil utilisateur"""
-        self.ui.stackedWidget.setCurrentIndex(6)
+        self.ui.stackedWidget.setCurrentIndex(_PAGE_PROFILE)
         if self.current_user:
             self.ui.label_10.setText(f"Profil de {self.current_user['username']}")
         app_logger.info("Accès au profil utilisateur")
@@ -323,7 +327,7 @@ class MainWindow(QMainWindow):
         
         for btn in btn_list:
             # Ne pas modifier les boutons pour search et user
-            if index in [5, 6]:
+            if index in [_PAGE_SEARCH, _PAGE_PROFILE]:
                 btn.setAutoExclusive(False)
                 btn.setChecked(False)
             else:

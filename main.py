@@ -5,6 +5,8 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtWidgets import QDialog, QMessageBox, QApplication
 from PyQt6.QtCore import QTimer, Qt, QFile, QTextStream, QIODevice, QSettings
 import sys
+import base64
+import socket
 from pathlib import Path
 import sqlite3
 import hashlib
@@ -202,6 +204,31 @@ class Ui_Form(object):
         self.label_8.setText(_translate("Form", "Bienvenue dans l’application de gestion de l’accueil de la Caisse Nationale de Prévoyance Sociale.\n"
 ""))
 
+# ===== PARTIE 1b: CHIFFREMENT LOCAL "SE SOUVENIR DE MOI" =====
+# Chiffrement XOR + base64 avec clé dérivée du nom de machine.
+# Obfuscation locale uniquement — ne jamais transmettre ces données sur le réseau.
+
+def _machine_key() -> bytes:
+    """Clé 32 octets dérivée du nom d'hôte (spécifique à la machine)."""
+    machine_id = (socket.gethostname() + "CNPS_ACCUEIL_v1").encode()
+    return hashlib.sha256(machine_id).digest()
+
+
+def _encrypt_credential(value: str) -> str:
+    """Chiffre `value` avec XOR machine-key + base64."""
+    key   = _machine_key()
+    enc   = bytes(b ^ key[i % len(key)] for i, b in enumerate(value.encode("utf-8")))
+    return base64.b64encode(enc).decode("ascii")
+
+
+def _decrypt_credential(token: str) -> str:
+    """Déchiffre un token produit par `_encrypt_credential`."""
+    key   = _machine_key()
+    enc   = base64.b64decode(token.encode("ascii"))
+    dec   = bytes(b ^ key[i % len(key)] for i, b in enumerate(enc))
+    return dec.decode("utf-8")
+
+
 # ===== PARTIE 2: FONCTIONS DE HASHAGE =====
 
 _HEX_CHARS = frozenset("0123456789abcdef")
@@ -345,6 +372,18 @@ class LoginApp(QDialog):
         
         self.db_path = AppConfig.get_db_path()
 
+        # ── Case "Se souvenir de moi" ─────────────────────────────────────────
+        self._chk_remember = QtWidgets.QCheckBox("Se souvenir de moi", self.ui.widget)
+        self._chk_remember.setGeometry(QtCore.QRect(295, 262, 190, 24))
+        self._chk_remember.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._chk_remember.setStyleSheet(
+            "QCheckBox { color: #94a3b8; font-size: 11px; background: transparent; }"
+            "QCheckBox::indicator { width: 14px; height: 14px; border-radius: 3px;"
+            "  border: 1px solid #475569; background: #1e293b; }"
+            "QCheckBox::indicator:checked { background: #3b82f6; border-color: #3b82f6; }"
+            "QCheckBox::indicator:hover { border-color: #3b82f6; }"
+        )
+
         self.creer_table()
         self.creer_utilisateurs_defaut()
         self.charger_dernieres_identifiants()
@@ -361,20 +400,45 @@ class LoginApp(QDialog):
         return conn
 
     def charger_dernieres_identifiants(self):
-        """Charge le dernier identifiant (username uniquement, jamais le mot de passe)."""
-        last_username = self.settings.value("auth/last_username", "", type=str)
-        # Purge l'ancien mot de passe en clair s'il était stocké
+        """Charge username + mot de passe chiffré si l'option était cochée."""
+        # Purge l'ancien mot de passe en clair s'il était stocké (sécurité legacy)
         if self.settings.contains("auth/last_password"):
             self.settings.remove("auth/last_password")
             self.settings.sync()
 
+        last_username  = self.settings.value("auth/last_username",  "", type=str)
+        remember_me    = self.settings.value("auth/remember_me",    False, type=bool)
+        encrypted_pass = self.settings.value("auth/remember_token", "", type=str)
+
         if last_username:
             self.ui.lineEdit.setText(last_username)
-            print("✅ Dernier identifiant chargé")
 
-    def sauvegarder_dernier_identifiant(self, username: str):
-        """Sauvegarde uniquement le nom d'utilisateur (jamais le mot de passe)."""
+        if remember_me and encrypted_pass:
+            try:
+                mot_de_passe = _decrypt_credential(encrypted_pass)
+                self.ui.lineEdit_2.setText(mot_de_passe)
+                self._chk_remember.setChecked(True)
+                print("✅ Identifiants mémorisés chargés")
+            except Exception:
+                # Token corrompu ou changement de machine → on efface proprement
+                self._effacer_credentials_memorises()
+
+    def sauvegarder_identifiants(self, username: str, mot_de_passe: str, remember: bool):
+        """Sauvegarde username et, si `remember`, le mot de passe chiffré."""
         self.settings.setValue("auth/last_username", username)
+        self.settings.setValue("auth/remember_me",   remember)
+        if remember:
+            self.settings.setValue("auth/remember_token", _encrypt_credential(mot_de_passe))
+        else:
+            self._effacer_credentials_memorises(keep_username=True)
+        self.settings.sync()
+
+    def _effacer_credentials_memorises(self, keep_username: bool = False):
+        """Efface les credentials mémorisés (conserve le username si demandé)."""
+        if not keep_username:
+            self.settings.remove("auth/last_username")
+        self.settings.remove("auth/remember_me")
+        self.settings.remove("auth/remember_token")
         self.settings.sync()
     
     def creer_table(self):
@@ -411,7 +475,7 @@ class LoginApp(QDialog):
             
             if count == 0:
                 for user in AppConfig.DEFAULT_USERS:
-                    password_hash = hash_password(user['password'])
+                    password_hash = hash_password(user['initial_password'])
                     cursor.execute("""
                         INSERT INTO auth_user 
                         (username, password, email, is_active, is_superuser, is_staff, date_joined, role)
@@ -482,7 +546,10 @@ class LoginApp(QDialog):
                     print(f"✅ Connexion réussie: {identifiant} ({self.utilisateur['role']})")
                     self.tentatives = 0
                     self.afficher_message("✅ Connexion réussie!", "#28a745")
-                    self.sauvegarder_dernier_identifiant(identifiant)
+                    self.sauvegarder_identifiants(
+                        identifiant, mot_de_passe,
+                        self._chk_remember.isChecked(),
+                    )
                     self.mettre_a_jour_last_login(user[0])
                     # Migration SHA256 → bcrypt si bcrypt disponible
                     if _BCRYPT_AVAILABLE and _is_sha256_hash(user[2]):
