@@ -157,20 +157,18 @@ class DatabaseConnection:
         );
 
         CREATE TABLE IF NOT EXISTS auth_user (
-            id TEXT PRIMARY KEY,
-            username TEXT NOT NULL UNIQUE,
-            password TEXT NOT NULL,
-            email TEXT,
-            role TEXT NOT NULL DEFAULT 'preaccueil',
-            is_active INTEGER NOT NULL DEFAULT 1,
-            is_superuser INTEGER NOT NULL DEFAULT 0,
-            is_staff INTEGER NOT NULL DEFAULT 0,
-            last_login TEXT,
-            date_joined TEXT,
-            nom TEXT,
-            prenom TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username VARCHAR(150) NOT NULL UNIQUE,
+            password VARCHAR(128) NOT NULL,
+            email VARCHAR(254) NOT NULL DEFAULT '',
+            is_active BOOLEAN NOT NULL DEFAULT 1,
+            is_superuser BOOLEAN NOT NULL DEFAULT 0,
+            is_staff BOOLEAN NOT NULL DEFAULT 0,
+            date_joined DATETIME NOT NULL,
+            last_login DATETIME,
+            role VARCHAR(20) DEFAULT 'preaccueil',
+            echecs INTEGER NOT NULL DEFAULT 0,
+            verrouille_jusqua TEXT
         );
         """
 
@@ -189,6 +187,11 @@ class DatabaseConnection:
             self._apply_pragmas(conn)
             conn.executescript(schema_sql)
             conn.executescript(seed_sql)
+            # Bases existantes: ajoute les colonnes de verrouillage si absentes
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(auth_user)")}
+            for col, ddl in (("echecs", "INTEGER NOT NULL DEFAULT 0"), ("verrouille_jusqua", "TEXT")):
+                if col not in cols:
+                    conn.execute(f"ALTER TABLE auth_user ADD COLUMN {col} {ddl}")
             conn.commit()
             conn.close()
         except Exception as exc:

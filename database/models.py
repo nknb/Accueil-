@@ -2,13 +2,13 @@
 from dataclasses import dataclass, field
 from datetime import datetime, date, time, timedelta
 from typing import Optional, List, Dict, Any
-import uuid
 from enum import Enum
-import hashlib
-import os
 
 # Importer db depuis connection.py, PAS depuis models
+import logging
 from database.connection import db
+
+logger = logging.getLogger("CNPS-Accueil.Models")
 
 # ============= ENUMS =============
 
@@ -207,7 +207,7 @@ class Service:
             results = db.execute_query(query)
             return [cls(**r) for r in results]
         except Exception as e:
-            print(f"Erreur récupération services: {e}")
+            logger.error("Erreur récupération services: %s", e)
             return []
     
     @classmethod
@@ -220,7 +220,7 @@ class Service:
             )
             return cls(**result[0]) if result else None
         except Exception as e:
-            print(f"Erreur récupération service {service_id}: {e}")
+            logger.error("Erreur récupération service %s: %s", service_id, e)
             return None
 
 # ============= MODELE MOTIF =============
@@ -245,7 +245,7 @@ class Motif:
             results = db.execute_query(query)
             return [cls(**r) for r in results]
         except Exception as e:
-            print(f"Erreur récupération motifs: {e}")
+            logger.error("Erreur récupération motifs: %s", e)
             return []
     
     @classmethod
@@ -258,7 +258,7 @@ class Motif:
             )
             return cls(**result[0]) if result else None
         except Exception as e:
-            print(f"Erreur récupération motif {motif_id}: {e}")
+            logger.error("Erreur récupération motif %s: %s", motif_id, e)
             return None
 
 # ============= MODELE DEMANDE =============
@@ -349,16 +349,7 @@ class DemandeAccueil:
         if self.updated_at is None:
             self.updated_at = datetime.now()
 
-    @staticmethod
-    def _get_next_numeric_id(min_base: int = 943) -> str:
-        """Retourne le prochain ID numérique de demande, avec un plancher minimal."""
-        try:
-            result = db.execute_query("SELECT MAX(CAST(id AS INTEGER)) AS max_id FROM accueil_demandeaccueil")
-            max_id = result[0].get("max_id") if result else None
-            max_id = int(max_id) if max_id is not None else min_base
-            return str(max(max_id, min_base) + 1)
-        except Exception:
-            return str(min_base + 1)
+    _MIN_ID_BASE = 943  # plancher: le premier id attribué est 944
 
     @staticmethod
     def _compute_delai_objectif_from_wait_time(wait_time: Optional[str]) -> int:
@@ -434,8 +425,8 @@ class DemandeAccueil:
                     (self.id,)
                 )
 
-            if not existing and (self.id is None or not str(self.id).isdigit()):
-                self.id = self._get_next_numeric_id()
+            # Nouvel id calculé dans l'INSERT lui-même (atomique, évite les doublons multi-postes)
+            auto_id = not existing and (self.id is None or not str(self.id).isdigit())
 
             # Préparer les dates pour la sauvegarde
             date_str = self.date.isoformat() if hasattr(self.date, 'isoformat') else str(self.date)
@@ -482,13 +473,27 @@ class DemandeAccueil:
             else:
                 # Insertion
                 data['created_at'] = created_at_str
+                if auto_id:
+                    del data['id']
+                    columns = ', '.join(data.keys())
+                    placeholders = ', '.join(['?'] * len(data))
+                    query = (
+                        f"INSERT INTO accueil_demandeaccueil (id, {columns}) "
+                        f"SELECT CAST(MAX(COALESCE(MAX(CAST(id AS INTEGER)), 0), {self._MIN_ID_BASE}) + 1 AS TEXT), "
+                        f"{placeholders} FROM accueil_demandeaccueil"
+                    )
+                    rowid = db.execute_insert(query, tuple(data.values()))
+                    self.id = db.execute_query(
+                        "SELECT id FROM accueil_demandeaccueil WHERE rowid = ?", (rowid,)
+                    )[0]['id']
+                    return True
                 columns = ', '.join(data.keys())
                 placeholders = ', '.join(['?'] * len(data))
                 query = f"INSERT INTO accueil_demandeaccueil ({columns}) VALUES ({placeholders})"
                 return db.execute_insert(query, tuple(data.values())) > 0
-                
-        except Exception as e:
-            print(f"Erreur lors de la sauvegarde: {e}")
+
+        except Exception:
+            logger.exception("Erreur lors de la sauvegarde de la demande")
             return False
     
     @classmethod
@@ -522,7 +527,7 @@ class DemandeAccueil:
             return [cls(**r) for r in results]
             
         except Exception as e:
-            print(f"Erreur lors de la récupération des demandes: {e}")
+            logger.error("Erreur lors de la récupération des demandes: %s", e)
             return []
     
     @classmethod
@@ -535,7 +540,7 @@ class DemandeAccueil:
             )
             return cls(**result[0]) if result else None
         except Exception as e:
-            print(f"Erreur lors de la récupération de la demande: {e}")
+            logger.error("Erreur lors de la récupération de la demande: %s", e)
             return None
     
     def marquer_traite(self):
@@ -574,159 +579,7 @@ class DemandeAccueil:
                     self.temps_attente = str(delta)
                     self.delai_objectif = self._compute_delai_objectif_from_wait_time(self.temps_attente)
             except Exception as e:
-                print(f"Erreur lors du calcul du temps d'attente: {e}")
-
-# ============= MODELE UTILISATEUR =============
-
-class Utilisateur:
-    """Modèle utilisateur avec authentification sécurisée"""
-    
-    def __init__(self, id=None, username=None, password_hash=None, email=None,
-                 role='preaccueil', is_active=True, last_login=None,
-                 date_joined=None, nom=None, prenom=None):
-        self.id = id
-        self.username = username
-        self.password_hash = password_hash
-        self.email = email
-        self.role = role
-        self.is_active = is_active
-        self.last_login = last_login
-        self.date_joined = date_joined or datetime.now()
-        self.nom = nom or ""
-        self.prenom = prenom or ""
-    
-    @staticmethod
-    def hash_password(password: str) -> str:
-        """Hash sécurisé du mot de passe (bcrypt, cohérent avec password_manager.py)."""
-        try:
-            from utils.password_manager import PasswordManager
-            return PasswordManager.hash_password(password)
-        except Exception:
-            # Fallback PBKDF2 si bcrypt indisponible
-            salt = os.urandom(32).hex()
-            iterations = 100_000
-            h = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), iterations)
-            return f"{salt}${iterations}${h.hex()}"
-
-    @staticmethod
-    def verify_password(password: str, password_hash: str) -> bool:
-        """Vérifie le mot de passe (bcrypt ou PBKDF2 legacy)."""
-        try:
-            if password_hash.startswith(("$2b$", "$2a$", "$2y$")):
-                from utils.password_manager import PasswordManager
-                return PasswordManager.verify_password(password, password_hash)
-            # Format PBKDF2 legacy : salt$iterations$hash
-            salt, iterations, hash_hex = password_hash.split('$')
-            h = hashlib.pbkdf2_hmac(
-                'sha256', password.encode(), salt.encode(), int(iterations)
-            )
-            return h.hex() == hash_hex
-        except Exception as e:
-            print(f"Erreur vérification mot de passe: {e}")
-            return False
-    
-    def save(self) -> bool:
-        """Sauvegarde l'utilisateur en base"""
-        try:
-            if self.id:
-                # Mise à jour
-                query = """
-                    UPDATE auth_user 
-                    SET username = ?, email = ?, role = ?, is_active = ?,
-                        last_login = ?, nom = ?, prenom = ?
-                    WHERE id = ?
-                """
-                params = (self.username, self.email, self.role, 1 if self.is_active else 0,
-                         self.last_login.isoformat() if self.last_login else None,
-                         self.nom, self.prenom, self.id)
-                db.execute_update(query, params)
-            else:
-                # Création
-                query = """
-                    INSERT INTO auth_user 
-                    (id, username, password, email, role, is_active, date_joined, nom, prenom)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """
-                self.id = self.id or str(uuid.uuid4())
-                params = (self.id, self.username, self.password_hash, self.email,
-                         self.role, 1, self.date_joined.isoformat(),
-                         self.nom, self.prenom)
-                db.execute_insert(query, params)
-            return True
-        except Exception as e:
-            print(f"Erreur sauvegarde utilisateur: {e}")
-            return False
-    
-    @classmethod
-    def authenticate(cls, username: str, password: str) -> Optional['Utilisateur']:
-        """Authentifie un utilisateur"""
-        try:
-            result = db.execute_query(
-                "SELECT * FROM auth_user WHERE username = ? AND is_active = 1",
-                (username,)
-            )
-            
-            if result and cls.verify_password(password, result[0]['password']):
-                user = cls(
-                    id=result[0]['id'],
-                    username=result[0]['username'],
-                    password_hash=result[0]['password'],
-                    email=result[0]['email'],
-                    role=result[0]['role'],
-                    is_active=bool(result[0]['is_active']),
-                    nom=result[0].get('nom', ''),
-                    prenom=result[0].get('prenom', ''),
-                    date_joined=result[0].get('date_joined')
-                )
-                
-                # Mettre à jour last_login
-                user.last_login = datetime.now()
-                user.save()
-                
-                return user
-        except Exception as e:
-            print(f"Erreur authentification: {e}")
-        
-        return None
-    
-    @classmethod
-    def get_by_id(cls, user_id: str) -> Optional['Utilisateur']:
-        """Récupère un utilisateur par son ID"""
-        try:
-            result = db.execute_query(
-                "SELECT * FROM auth_user WHERE id = ?",
-                (user_id,)
-            )
-            if result:
-                return cls(**result[0])
-        except Exception as e:
-            print(f"Erreur récupération utilisateur: {e}")
-        return None
-    
-    def has_permission(self, permission: str) -> bool:
-        """Vérifie si l'utilisateur a une permission"""
-        try:
-            role = Role(self.role)
-            return Permission.has_permission(role, permission)
-        except Exception:
-            return False
-    
-    def has_role(self, role_name: str) -> bool:
-        """Vérifie si l'utilisateur a un rôle spécifique"""
-        return self.role == role_name
-    
-    @property
-    def role_display(self):
-        """Affichage du rôle"""
-        try:
-            return str(Role(self.role))
-        except Exception:
-            return self.role
-    
-    @property
-    def full_name(self):
-        """Nom complet"""
-        return f"{self.prenom} {self.nom}".strip() or self.username
+                logger.error("Erreur lors du calcul du temps d'attente: %s", e)
 
 # ============= STATISTIQUES =============
 
@@ -768,7 +621,7 @@ class StatistiquesQuotidiennes:
                 stats.satisfaction_moyenne = sum(notes) / len(notes)
                 
         except Exception as e:
-            print(f"Erreur calcul statistiques: {e}")
+            logger.error("Erreur calcul statistiques: %s", e)
         
         return stats
     
@@ -777,51 +630,3 @@ class StatistiquesQuotidiennes:
         if self.total_demandes > 0:
             return round((self.demandes_traitees / self.total_demandes) * 100, 1)
         return 0
-
-# ============= INITIALISATION BASE DE DONNEES =============
-
-def init_auth_database():
-    """Initialise les tables d'authentification"""
-    
-    create_table_query = """
-    CREATE TABLE IF NOT EXISTS auth_user (
-        id VARCHAR(36) PRIMARY KEY,
-        username VARCHAR(150) NOT NULL UNIQUE,
-        password VARCHAR(255) NOT NULL,
-        email VARCHAR(254),
-        role VARCHAR(20) NOT NULL DEFAULT 'preaccueil',
-        is_active BOOLEAN NOT NULL DEFAULT 1,
-        last_login DATETIME,
-        date_joined DATETIME NOT NULL,
-        nom VARCHAR(100),
-        prenom VARCHAR(100),
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    
-    CREATE INDEX IF NOT EXISTS idx_auth_user_username ON auth_user(username);
-    CREATE INDEX IF NOT EXISTS idx_auth_user_role ON auth_user(role);
-    CREATE INDEX IF NOT EXISTS idx_auth_user_active ON auth_user(is_active);
-    """
-    
-    try:
-        with db.get_connection() as conn:
-            conn.executescript(create_table_query)
-        print("✅ Table auth_user créée/vérifiée avec succès")
-        
-        # Créer l'admin par défaut si aucun utilisateur n'existe
-        users = db.execute_query("SELECT COUNT(*) as count FROM auth_user")
-        if users and users[0]['count'] == 0:
-            admin = Utilisateur(
-                username="admin",
-                email="admin@cnps.ci",
-                role="admin",
-                nom="Administrateur",
-                prenom="Système"
-            )
-            admin.password_hash = Utilisateur.hash_password("Admin@2024")
-            admin.save()
-            print("✅ Administrateur par défaut créé: admin / Admin@2024")
-            
-    except Exception as e:
-        print(f"Erreur création table auth_user: {e}")

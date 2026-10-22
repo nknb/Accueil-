@@ -597,7 +597,11 @@ class _MotifServiceTab(QWidget):
         self._current_table = self.table_combo.currentData()
         self._load_data()
 
+    _TABLES_AUTORISEES = frozenset({"accueil_motif", "accueil_service"})
+
     def _load_data(self) -> None:
+        # Le nom de table est inséré dans le SQL: on n'accepte que ces deux tables
+        assert self._current_table in self._TABLES_AUTORISEES, self._current_table
         try:
             cols_info = db.execute_query(f"PRAGMA table_info({self._current_table})")
             self._columns = [c.get("name") for c in cols_info]

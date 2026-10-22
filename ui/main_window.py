@@ -10,7 +10,7 @@ import uuid
 from database.connection import db
 from database.models import (
     DemandeAccueil, Service, Motif, 
-    Priorite, Statut, Utilisateur, Role, Permission
+    Priorite, Statut, Role, Permission
 )
 from ui.dashboard import DashboardSimple as DashboardWidget
 from ui.demande_widgets import DemandeFormWidget, DemandeTableWidget

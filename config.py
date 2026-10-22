@@ -189,30 +189,25 @@ class AppConfig:
     LOCKOUT_DURATION = 300000  # en millisecondes (5 minutes)
 
     # Utilisateurs créés uniquement au PREMIER démarrage si la table est vide.
-    # Le champ 'initial_password' est hashé (bcrypt) avant insertion — jamais
-    # stocké en clair en base. Ces comptes doivent être modifiés après déploiement.
+    # Ils ne sont jamais stockés en clair.
     DEFAULT_USERS = [
         {
             'username': 'admin',
-            'initial_password': 'Admin@CNPS2025!',
             'email': 'admin@cnps.ci',
             'role': 'admin',
         },
         {
             'username': 'manager',
-            'initial_password': 'Manager@CNPS2025!',
             'email': 'manager@cnps.ci',
             'role': 'manager',
         },
         {
             'username': 'accueil',
-            'initial_password': 'Accueil@CNPS2025!',
             'email': 'accueil@cnps.ci',
             'role': 'accueil',
         },
         {
             'username': 'preaccueil',
-            'initial_password': 'Preaccueil@CNPS2025!',
             'email': 'preaccueil@cnps.ci',
             'role': 'preaccueil',
         },

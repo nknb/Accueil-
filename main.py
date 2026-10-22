@@ -5,21 +5,14 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtWidgets import QDialog, QMessageBox, QApplication
 from PyQt6.QtCore import QTimer, Qt, QFile, QTextStream, QIODevice, QSettings
 import sys
-import base64
-import socket
+import secrets
 from pathlib import Path
 import sqlite3
-import hashlib
 import warnings
 import os
 from datetime import datetime, timedelta
 
-# Bcrypt disponible via utils/password_manager
-try:
-    from utils.password_manager import PasswordManager as _PM
-    _BCRYPT_AVAILABLE = True
-except ImportError:
-    _BCRYPT_AVAILABLE = False
+from utils.password_manager import PasswordManager as _PM
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -39,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 # Importer la configuration
 from config import AppConfig
+from database.connection import DatabaseConnection
 import res  # Resource file
 
 # ===== IMPORTER LA FENÊTRE PRINCIPALE =====
@@ -204,89 +198,6 @@ class Ui_Form(object):
         self.label_8.setText(_translate("Form", "Bienvenue dans l’application de gestion de l’accueil de la Caisse Nationale de Prévoyance Sociale.\n"
 ""))
 
-# ===== PARTIE 1b: CHIFFREMENT LOCAL "SE SOUVENIR DE MOI" =====
-# Chiffrement XOR + base64 avec clé dérivée du nom de machine.
-# Obfuscation locale uniquement — ne jamais transmettre ces données sur le réseau.
-
-def _machine_key() -> bytes:
-    """Clé 32 octets dérivée du nom d'hôte (spécifique à la machine)."""
-    machine_id = (socket.gethostname() + "CNPS_ACCUEIL_v1").encode()
-    return hashlib.sha256(machine_id).digest()
-
-
-def _encrypt_credential(value: str) -> str:
-    """Chiffre `value` avec XOR machine-key + base64."""
-    key   = _machine_key()
-    enc   = bytes(b ^ key[i % len(key)] for i, b in enumerate(value.encode("utf-8")))
-    return base64.b64encode(enc).decode("ascii")
-
-
-def _decrypt_credential(token: str) -> str:
-    """Déchiffre un token produit par `_encrypt_credential`."""
-    key   = _machine_key()
-    enc   = base64.b64decode(token.encode("ascii"))
-    dec   = bytes(b ^ key[i % len(key)] for i, b in enumerate(enc))
-    return dec.decode("utf-8")
-
-
-# ===== PARTIE 2: FONCTIONS DE HASHAGE =====
-
-_HEX_CHARS = frozenset("0123456789abcdef")
-
-
-def _sha256_hex(mot_de_passe: str) -> str:
-    """Hash SHA256 brut (usage interne migration uniquement)."""
-    return hashlib.sha256(mot_de_passe.encode("utf-8")).hexdigest()
-
-
-def _is_sha256_hash(h: str) -> bool:
-    """Détecte si un hash est au format SHA256 legacy (64 caractères hex)."""
-    return len(h) == 64 and all(c in _HEX_CHARS for c in h.lower())
-
-
-def hash_password(mot_de_passe: str) -> str:
-    """Hash un mot de passe. Utilise bcrypt si disponible, sinon SHA256.
-
-    Returns:
-        str: Le hash du mot de passe (bcrypt ou SHA256 hex)
-    """
-    if _BCRYPT_AVAILABLE:
-        return _PM.hash_password(mot_de_passe)
-    return _sha256_hex(mot_de_passe)
-
-
-def verifier_mot_de_passe(mot_de_passe_entre: str, hash_stocke: str) -> bool:
-    """Vérifie un mot de passe contre son hash stocké.
-
-    Supporte la migration transparente SHA256 → bcrypt :
-    - Si le hash stocké est un SHA256 legacy (64 hex), vérifie avec SHA256.
-    - Si le hash stocké est bcrypt (commence par $2b$), vérifie avec bcrypt.
-    - Si bcrypt n'est pas disponible, repli sur SHA256.
-
-    Returns:
-        bool: True si le mot de passe correspond
-    """
-    if not hash_stocke:
-        return False
-
-    # Hash bcrypt
-    if hash_stocke.startswith("$2b$") or hash_stocke.startswith("$2a$"):
-        if _BCRYPT_AVAILABLE:
-            return _PM.verify_password(mot_de_passe_entre, hash_stocke)
-        return False
-
-    # Hash SHA256 legacy
-    if _is_sha256_hash(hash_stocke):
-        return _sha256_hex(mot_de_passe_entre) == hash_stocke.lower()
-
-    # Fallback
-    return _sha256_hex(mot_de_passe_entre) == hash_stocke
-
-
-# Alias de compatibilité
-hash_sha256 = _sha256_hex
-
-
 def log_runtime_db_path(db_path: Path):
     """Journalise le chemin DB réellement utilisé au démarrage."""
     try:
@@ -313,8 +224,7 @@ class LoginApp(QDialog):
     Gère:
     - Affichage de l'interface de connexion
     - Vérification des identifiants en base de données
-    - SHA256 des mots de passe
-    - Limitation du nombre de tentatives (5 max)
+    - Limitation du nombre de tentatives (5 max, verrouillage en base)
     - Création des utilisateurs par défaut
     - Transition vers la fenêtre principale
     
@@ -372,18 +282,6 @@ class LoginApp(QDialog):
         
         self.db_path = AppConfig.get_db_path()
 
-        # ── Case "Se souvenir de moi" ─────────────────────────────────────────
-        self._chk_remember = QtWidgets.QCheckBox("Se souvenir de moi", self.ui.widget)
-        self._chk_remember.setGeometry(QtCore.QRect(295, 262, 190, 24))
-        self._chk_remember.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._chk_remember.setStyleSheet(
-            "QCheckBox { color: #94a3b8; font-size: 11px; background: transparent; }"
-            "QCheckBox::indicator { width: 14px; height: 14px; border-radius: 3px;"
-            "  border: 1px solid #475569; background: #1e293b; }"
-            "QCheckBox::indicator:checked { background: #3b82f6; border-color: #3b82f6; }"
-            "QCheckBox::indicator:hover { border-color: #3b82f6; }"
-        )
-
         self.creer_table()
         self.creer_utilisateurs_defaut()
         self.charger_dernieres_identifiants()
@@ -392,79 +290,22 @@ class LoginApp(QDialog):
     def _open_db_connection(self) -> sqlite3.Connection:
         """Ouvre une connexion SQLite avec pragmas adaptés au multi-accès."""
         conn = sqlite3.connect(str(self.db_path), timeout=AppConfig.DB_TIMEOUT)
-        pragmas = AppConfig.get_sqlite_pragmas(self.db_path)
-        conn.execute(f"PRAGMA journal_mode = {pragmas['journal_mode']}")
-        conn.execute(f"PRAGMA busy_timeout = {pragmas['busy_timeout_ms']}")
-        conn.execute(f"PRAGMA foreign_keys = {pragmas['foreign_keys']}")
-        conn.execute(f"PRAGMA synchronous = {pragmas['synchronous']}")
+        self._dbc._apply_pragmas(conn)
         return conn
 
     def charger_dernieres_identifiants(self):
-        """Charge username + mot de passe chiffré si l'option était cochée."""
-        # Purge l'ancien mot de passe en clair s'il était stocké (sécurité legacy)
-        if self.settings.contains("auth/last_password"):
-            self.settings.remove("auth/last_password")
-            self.settings.sync()
-
-        last_username  = self.settings.value("auth/last_username",  "", type=str)
-        remember_me    = self.settings.value("auth/remember_me",    False, type=bool)
-        encrypted_pass = self.settings.value("auth/remember_token", "", type=str)
-
+        """Pré-remplit l'identifiant (jamais le mot de passe)."""
+        # Purge les mots de passe mémorisés par les anciennes versions
+        for cle in ("auth/last_password", "auth/remember_token", "auth/remember_me"):
+            self.settings.remove(cle)
+        last_username = self.settings.value("auth/last_username", "", type=str)
         if last_username:
             self.ui.lineEdit.setText(last_username)
 
-        if remember_me and encrypted_pass:
-            try:
-                mot_de_passe = _decrypt_credential(encrypted_pass)
-                self.ui.lineEdit_2.setText(mot_de_passe)
-                self._chk_remember.setChecked(True)
-                print("✅ Identifiants mémorisés chargés")
-            except Exception:
-                # Token corrompu ou changement de machine → on efface proprement
-                self._effacer_credentials_memorises()
-
-    def sauvegarder_identifiants(self, username: str, mot_de_passe: str, remember: bool):
-        """Sauvegarde username et, si `remember`, le mot de passe chiffré."""
-        self.settings.setValue("auth/last_username", username)
-        self.settings.setValue("auth/remember_me",   remember)
-        if remember:
-            self.settings.setValue("auth/remember_token", _encrypt_credential(mot_de_passe))
-        else:
-            self._effacer_credentials_memorises(keep_username=True)
-        self.settings.sync()
-
-    def _effacer_credentials_memorises(self, keep_username: bool = False):
-        """Efface les credentials mémorisés (conserve le username si demandé)."""
-        if not keep_username:
-            self.settings.remove("auth/last_username")
-        self.settings.remove("auth/remember_me")
-        self.settings.remove("auth/remember_token")
-        self.settings.sync()
-    
     def creer_table(self):
-        try:
-            conn = self._open_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS auth_user (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    username VARCHAR(150) NOT NULL UNIQUE,
-                    password VARCHAR(128) NOT NULL,
-                    email VARCHAR(254) NOT NULL DEFAULT '',
-                    is_active BOOLEAN NOT NULL DEFAULT 1,
-                    is_superuser BOOLEAN NOT NULL DEFAULT 0,
-                    is_staff BOOLEAN NOT NULL DEFAULT 0,
-                    date_joined DATETIME NOT NULL,
-                    last_login DATETIME,
-                    role VARCHAR(20) DEFAULT 'preaccueil'
-                )
-            """)
-            conn.commit()
-            conn.close()
-            print("✅ Table auth_user créée/vérifiée")
-        except Exception as e:
-            print(f"❌ Erreur création table: {e}")
-    
+        # Schéma unique, défini dans database/connection.py (créé si absent, idempotent)
+        self._dbc = DatabaseConnection(self.db_path)
+
     def creer_utilisateurs_defaut(self):
         """Crée les utilisateurs par défaut s'ils n'existent pas"""
         try:
@@ -474,8 +315,11 @@ class LoginApp(QDialog):
             count = cursor.fetchone()[0]
             
             if count == 0:
+                crees = []
                 for user in AppConfig.DEFAULT_USERS:
-                    password_hash = hash_password(user['initial_password'])
+                    mot_de_passe = secrets.token_urlsafe(12)
+                    crees.append(f"{user['username']} : {mot_de_passe}")
+                    password_hash = _PM.hash_password(mot_de_passe)
                     cursor.execute("""
                         INSERT INTO auth_user 
                         (username, password, email, is_active, is_superuser, is_staff, date_joined, role)
@@ -492,6 +336,11 @@ class LoginApp(QDialog):
                     ))
                 conn.commit()
                 print("✅ Utilisateurs par défaut créés")
+                # Affichés une seule fois: ils ne sont stockés nulle part en clair
+                QMessageBox.information(
+                    self, "Comptes créés",
+                    "Notez ces mots de passe, ils ne seront plus affichés :\n\n" + "\n".join(crees),
+                )
             conn.close()
         except Exception as e:
             print(f"❌ Erreur création utilisateurs: {e}")
@@ -526,15 +375,19 @@ class LoginApp(QDialog):
             conn = self._open_db_connection()
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT id, username, password, email, role, is_superuser 
-                FROM auth_user 
+                SELECT id, username, password, email, role, is_superuser, echecs, verrouille_jusqua
+                FROM auth_user
                 WHERE username = ? AND is_active = 1
             """, (identifiant,))
             user = cursor.fetchone()
             conn.close()
-            
+
+            if user and user[7] and user[7] > datetime.now().isoformat():
+                self.afficher_message("⛔ Compte verrouillé, réessayez plus tard", "#dc3545")
+                return
+
             if user:
-                if verifier_mot_de_passe(mot_de_passe, user[2]):
+                if _PM.verify_password(mot_de_passe, user[2]):
                     self.utilisateur = {
                         'id': user[0],
                         'username': user[1],
@@ -546,21 +399,14 @@ class LoginApp(QDialog):
                     print(f"✅ Connexion réussie: {identifiant} ({self.utilisateur['role']})")
                     self.tentatives = 0
                     self.afficher_message("✅ Connexion réussie!", "#28a745")
-                    self.sauvegarder_identifiants(
-                        identifiant, mot_de_passe,
-                        self._chk_remember.isChecked(),
-                    )
-                    self.mettre_a_jour_last_login(user[0])
-                    # Migration SHA256 → bcrypt si bcrypt disponible
-                    if _BCRYPT_AVAILABLE and _is_sha256_hash(user[2]):
-                        self._migrer_hash_bcrypt(user[0], mot_de_passe)
-                    
+                    self.settings.setValue("auth/last_username", identifiant)
+                    self._maj_apres_connexion(user[0])
+
                     # Ouvrir la fenêtre principale
                     print("🔍 Tentative d'ouverture de la fenêtre principale...")
                     self.ouvrir_fenetre_principale()
                 else:
-                    self.tentatives += 1
-                    reste = self.max_tentatives - self.tentatives
+                    reste = self._enregistrer_echec(user[0], user[6] or 0)
                     self.afficher_message(f"❌ Mot de passe incorrect", "#dc3545")
                     if reste > 0:
                         self.tentative_label.setText(f"⚠️ Tentatives restantes: {reste}")
@@ -592,36 +438,40 @@ class LoginApp(QDialog):
             self.ui.pushButton.setEnabled(True)
             self.ui.pushButton.setText("Connexion")
     
-    def _migrer_hash_bcrypt(self, user_id, mot_de_passe: str):
-        """Remplace silencieusement un hash SHA256 legacy par un hash bcrypt."""
+    def _maj_apres_connexion(self, user_id: int):
+        """Date de dernière connexion + remise à zéro du compteur d'échecs."""
         try:
-            nouveau_hash = _PM.hash_password(mot_de_passe)
             conn = self._open_db_connection()
             conn.execute(
-                "UPDATE auth_user SET password = ? WHERE id = ?",
-                (nouveau_hash, user_id),
+                "UPDATE auth_user SET last_login = ?, echecs = 0, verrouille_jusqua = NULL WHERE id = ?",
+                (datetime.now().isoformat(), user_id),
             )
-            conn.commit()
-            conn.close()
-            print(f"✅ Hash migré SHA256→bcrypt pour user id={user_id}")
-        except Exception as exc:
-            print(f"⚠️ Migration hash bcrypt échouée: {exc}")
-
-    def mettre_a_jour_last_login(self, user_id: int):
-        """Met à jour la date de dernière connexion
-        
-        Args:
-            user_id: ID de l'utilisateur
-        """
-        try:
-            conn = self._open_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("UPDATE auth_user SET last_login = ? WHERE id = ?", 
-                         (datetime.now().isoformat(), user_id))
             conn.commit()
             conn.close()
         except Exception:
             pass
+
+    def _enregistrer_echec(self, user_id: int, echecs: int):
+        """Compte l'échec en base; verrouille le compte au-delà du maximum.
+
+        Stocké en base (pas en mémoire): relancer l'application ne remet pas le compteur à zéro.
+        """
+        echecs += 1
+        verrou = None
+        if echecs >= self.max_tentatives:
+            verrou = (datetime.now() + timedelta(milliseconds=AppConfig.LOCKOUT_DURATION)).isoformat()
+            echecs = 0
+        try:
+            conn = self._open_db_connection()
+            conn.execute(
+                "UPDATE auth_user SET echecs = ?, verrouille_jusqua = ? WHERE id = ?",
+                (echecs, verrou, user_id),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+        return self.max_tentatives - echecs if verrou is None else 0
     
     def ouvrir_fenetre_principale(self):
         """Ouvre la fenêtre principale après connexion réussie"""
@@ -846,7 +696,7 @@ class LoginApp(QDialog):
                 return
 
             stored_hash, role, is_super = row
-            if not verifier_mot_de_passe(password, stored_hash):
+            if not _PM.verify_password(password, stored_hash):
                 _reset_attempts[0] += 1
                 if _reset_attempts[0] >= 3:
                     _reset_locked_until[0] = datetime.now() + timedelta(minutes=5)

@@ -63,3 +63,10 @@ htmlcov/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Données et environnement locaux
+db.sqlite3
+db.sqlite3-*
+db_config.json
+venv*/
+nuitka-crash-report.xml
