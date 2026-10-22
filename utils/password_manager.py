@@ -22,10 +22,13 @@ class PasswordManager:
             str: Mot de passe hashé
             
         Raises:
-            ValueError: Si le mot de passe est vide
+            ValueError: Si le mot de passe est vide ou dépasse 72 octets
         """
         if not password:
             raise ValueError("Le mot de passe ne peut pas être vide")
+        # bcrypt ignore au-delà de 72 octets (erreur en 5.x): refuser plutôt que tronquer
+        if len(password.encode('utf-8')) > 72:
+            raise ValueError("Le mot de passe ne peut pas dépasser 72 octets")
         
         try:
             salt = bcrypt.gensalt(rounds=PasswordManager.BCRYPT_COST)

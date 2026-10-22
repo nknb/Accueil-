@@ -12,7 +12,7 @@ import sqlite3
 import time
 import random
 import logging
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Optional, List, Dict
 from datetime import datetime
@@ -183,19 +183,19 @@ class DatabaseConnection:
         """
 
         try:
-            conn = sqlite3.connect(str(self.db_path), timeout=AppConfig.DB_TIMEOUT)
-            self._apply_pragmas(conn)
-            conn.executescript(schema_sql)
-            conn.executescript(seed_sql)
-            # Bases existantes: ajoute les colonnes de verrouillage si absentes
-            cols = {r[1] for r in conn.execute("PRAGMA table_info(auth_user)")}
-            for col, ddl in (("echecs", "INTEGER NOT NULL DEFAULT 0"), ("verrouille_jusqua", "TEXT")):
-                if col not in cols:
-                    conn.execute(f"ALTER TABLE auth_user ADD COLUMN {col} {ddl}")
-            conn.commit()
-            conn.close()
+            with closing(sqlite3.connect(str(self.db_path), timeout=AppConfig.DB_TIMEOUT)) as conn:
+                self._apply_pragmas(conn)
+                conn.executescript(schema_sql)
+                conn.executescript(seed_sql)
+                # Bases existantes: ajoute les colonnes de verrouillage si absentes
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(auth_user)")}
+                for col, ddl in (("echecs", "INTEGER NOT NULL DEFAULT 0"), ("verrouille_jusqua", "TEXT")):
+                    if col not in cols:
+                        conn.execute(f"ALTER TABLE auth_user ADD COLUMN {col} {ddl}")
+                conn.commit()
         except Exception as exc:
-            logger.warning("Initialisation schéma minimal non appliquée: %s", exc)
+            # Non bloquant (poste hors ligne au démarrage), mais visible: les requêtes suivantes échoueront
+            logger.error("Initialisation schéma minimal non appliquée: %s", exc)
 
     # ── Index de performance ──────────────────────────────────────────────────
 
@@ -216,15 +216,14 @@ class DatabaseConnection:
         ]
 
         try:
-            conn = sqlite3.connect(str(self.db_path), timeout=AppConfig.DB_TIMEOUT)
-            self._apply_pragmas(conn)
-            for stmt in index_statements:
-                try:
-                    conn.execute(stmt)
-                except Exception as idx_err:
-                    logger.debug("Index ignoré (%s): %s", stmt, idx_err)
-            conn.commit()
-            conn.close()
+            with closing(sqlite3.connect(str(self.db_path), timeout=AppConfig.DB_TIMEOUT)) as conn:
+                self._apply_pragmas(conn)
+                for stmt in index_statements:
+                    try:
+                        conn.execute(stmt)
+                    except Exception as idx_err:
+                        logger.warning("Index ignoré (%s): %s", stmt, idx_err)
+                conn.commit()
         except Exception as exc:
             logger.warning("Initialisation des index non appliquée: %s", exc)
 
@@ -317,7 +316,6 @@ class DatabaseConnection:
         )
         return len(result) > 0
 
-    @_retry_on_lock
     def rollover_pending_to_non_traite(self) -> int:
         """Passe en 'non_traite' les demandes 'en_attente' des jours précédents."""
         today_str = datetime.now().date().isoformat()

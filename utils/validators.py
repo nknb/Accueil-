@@ -10,8 +10,8 @@ class InputValidator:
     """Classe pour valider les entrées utilisateur"""
     
     # Regex patterns
-    EMAIL_PATTERN = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
-    USERNAME_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{3,20}$')
+    EMAIL_PATTERN = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+    USERNAME_PATTERN = re.compile(r'[a-zA-Z0-9_-]{3,20}')
     PASSWORD_MIN_LENGTH = 8
     
     @staticmethod
@@ -33,7 +33,7 @@ class InputValidator:
         if len(username) > 20:
             return False, "Le nom d'utilisateur ne peut pas dépasser 20 caractères"
         
-        if not InputValidator.USERNAME_PATTERN.match(username):
+        if not InputValidator.USERNAME_PATTERN.fullmatch(username):
             return False, "Le nom d'utilisateur ne peut contenir que des lettres, chiffres, tirets et underscores"
         
         return True, None
@@ -59,7 +59,9 @@ class InputValidator:
         has_upper = any(c.isupper() for c in password)
         has_lower = any(c.islower() for c in password)
         has_digit = any(c.isdigit() for c in password)
-        has_special = any(c in "!@#$%^&*()" for c in password)
+        
+        if len(password.encode('utf-8')) > 72:
+            return False, "Le mot de passe ne peut pas dépasser 72 octets"
         
         if not (has_upper and has_lower and has_digit):
             return False, "Le mot de passe doit contenir au minimum une majuscule, une minuscule et un chiffre"
@@ -86,7 +88,7 @@ class InputValidator:
         if len(email) > 255:
             return False, "L'email ne peut pas dépasser 255 caractères"
         
-        if not InputValidator.EMAIL_PATTERN.match(email):
+        if not InputValidator.EMAIL_PATTERN.fullmatch(email) or '..' in email or email.startswith('.'):
             return False, "Format d'email invalide"
         
         return True, None
@@ -105,12 +107,12 @@ class InputValidator:
         # Valider le nom d'utilisateur
         is_valid, error = InputValidator.validate_username(username)
         if not is_valid:
-            auth_logger.warning(f"Tentative de connexion avec username invalide: {username}")
+            auth_logger.warning("Tentative de connexion avec un nom d'utilisateur invalide")
             return False, error
         
         # Vérifier les mots de passes (ne pas valider la force pour la connexion)
         if not password:
-            auth_logger.warning(f"Tentative de connexion sans mot de passe pour l'utilisateur: {username}")
+            auth_logger.warning("Tentative de connexion sans mot de passe")
             return False, "Le mot de passe ne peut pas être vide"
         
         if len(password) < 3:  # Minimum pour la connexion

@@ -1,6 +1,7 @@
 # database/models.py
 from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta
+from datetime import date as _date  # `date` est masqué par des paramètres/champs
 from typing import Optional, List, Dict, Any
 from enum import Enum
 
@@ -297,8 +298,10 @@ class DemandeAccueil:
         # Convertir les dates si elles sont en string
         if isinstance(self.date, str) and self.date:
             try:
-                self.date = datetime.strptime(self.date, "%Y-%m-%d").date()
+                # [:10] accepte aussi "YYYY-MM-DDTHH:MM:SS"
+                self.date = datetime.strptime(self.date[:10], "%Y-%m-%d").date()
             except ValueError:
+                logger.warning("Demande %s: date invalide %r, remplacée par aujourd'hui", self.id, self.date)
                 self.date = date.today()
         
         if isinstance(self.heure_arrivee, str) and self.heure_arrivee:
@@ -309,6 +312,7 @@ class DemandeAccueil:
                 else:
                     self.heure_arrivee = datetime.strptime(value[:8], "%H:%M:%S").time()
             except ValueError:
+                logger.warning("Demande %s: heure_arrivee invalide %r, ignorée", self.id, self.heure_arrivee)
                 self.heure_arrivee = None
 
         if isinstance(self.heure_reception, str) and self.heure_reception:
@@ -319,24 +323,28 @@ class DemandeAccueil:
                 else:
                     self.heure_reception = datetime.strptime(value[:8], "%H:%M:%S").time()
             except ValueError:
+                logger.warning("Demande %s: heure_reception invalide %r, ignorée", self.id, self.heure_reception)
                 self.heure_reception = None
                 
         if isinstance(self.created_at, str) and self.created_at:
             try:
                 self.created_at = datetime.fromisoformat(self.created_at.replace('Z', '+00:00'))
             except ValueError:
+                logger.warning("Demande %s: created_at invalide %r, remplacée par maintenant", self.id, self.created_at)
                 self.created_at = datetime.now()
                 
         if isinstance(self.updated_at, str) and self.updated_at:
             try:
                 self.updated_at = datetime.fromisoformat(self.updated_at.replace('Z', '+00:00'))
             except ValueError:
+                logger.warning("Demande %s: updated_at invalide %r, remplacée par maintenant", self.id, self.updated_at)
                 self.updated_at = datetime.now()
                 
         if isinstance(self.traite_le, str) and self.traite_le:
             try:
                 self.traite_le = datetime.fromisoformat(self.traite_le.replace('Z', '+00:00'))
             except ValueError:
+                logger.warning("Demande %s: traite_le invalide %r, ignoré", self.id, self.traite_le)
                 self.traite_le = None
         
         # Initialiser les valeurs par défaut si None
@@ -399,7 +407,10 @@ class DemandeAccueil:
             if isinstance(self.temps_attente, str):
                 parts = self.temps_attente.split(':')
                 if len(parts) == 3:
-                    h, m, s = map(int, parts)
+                    try:
+                        h, m, s = map(int, parts)
+                    except ValueError:  # valeur corrompue: ne pas faire planter l'affichage
+                        return None
                     return h * 60 + m + s // 60
         return None
     
@@ -496,9 +507,14 @@ class DemandeAccueil:
             logger.exception("Erreur lors de la sauvegarde de la demande")
             return False
     
+    @staticmethod
+    def _iso(valeur) -> str:
+        """Date (objet ou chaîne déjà ISO) -> chaîne ISO pour le filtre SQL"""
+        return valeur.isoformat() if hasattr(valeur, 'isoformat') else str(valeur)
+
     @classmethod
-    def get_all(cls, filters: Dict[str, Any] = None, limit: int = 100) -> List['DemandeAccueil']:
-        """Récupère toutes les demandes avec filtres"""
+    def get_all(cls, filters: Dict[str, Any] = None, limit: Optional[int] = None) -> List['DemandeAccueil']:
+        """Récupère les demandes avec filtres (limit=None: toutes, pour ne pas tronquer les statistiques)"""
         try:
             query = "SELECT * FROM accueil_demandeaccueil WHERE 1=1"
             params = []
@@ -506,10 +522,10 @@ class DemandeAccueil:
             if filters:
                 if filters.get('date_debut'):
                     query += " AND date >= ?"
-                    params.append(filters['date_debut'].isoformat())
+                    params.append(cls._iso(filters['date_debut']))
                 if filters.get('date_fin'):
                     query += " AND date <= ?"
-                    params.append(filters['date_fin'].isoformat())
+                    params.append(cls._iso(filters['date_fin']))
                 if filters.get('statut'):
                     query += " AND statut = ?"
                     params.append(filters['statut'])
@@ -520,11 +536,20 @@ class DemandeAccueil:
                     query += " AND priorite = ?"
                     params.append(filters['priorite'])
             
-            query += " ORDER BY date DESC, created_at DESC LIMIT ?"
-            params.append(limit)
+            query += " ORDER BY date DESC, created_at DESC"
+            if limit is not None:
+                query += " LIMIT ?"
+                params.append(limit)
             
             results = db.execute_query(query, tuple(params))
-            return [cls(**r) for r in results]
+            demandes = [cls(**r) for r in results]
+            # Précharge services/motifs (2 requêtes) au lieu d'une par ligne (N+1)
+            services = {s.id: s for s in Service.get_all(actif_only=False)}
+            motifs = {m.id: m for m in Motif.get_all(actif_only=False)}
+            for d in demandes:
+                d._service = services.get(d.service_demande_id)
+                d._motif = motifs.get(d.motif_id)
+            return demandes
             
         except Exception as e:
             logger.error("Erreur lors de la récupération des demandes: %s", e)
@@ -578,6 +603,9 @@ class DemandeAccueil:
                     delta = reception - arrivee
                     self.temps_attente = str(delta)
                     self.delai_objectif = self._compute_delai_objectif_from_wait_time(self.temps_attente)
+                else:
+                    # pas de date de réception: on ne devine pas un passage de minuit
+                    logger.warning("Demande %s: réception avant arrivée, temps d'attente inchangé", self.id)
             except Exception as e:
                 logger.error("Erreur lors du calcul du temps d'attente: %s", e)
 
@@ -587,7 +615,7 @@ class StatistiquesQuotidiennes:
     """Modèle pour les statistiques quotidiennes"""
     
     def __init__(self, date=None):
-        self.date = date or date.today()
+        self.date = date if date is not None else _date.today()
         self.total_demandes = 0
         self.demandes_traitees = 0
         self.demandes_urgentes = 0

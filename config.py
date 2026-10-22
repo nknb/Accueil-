@@ -4,8 +4,11 @@
 from pathlib import Path
 from typing import Optional
 import json
+import logging
 import os
 import sys
+
+logger = logging.getLogger("config")
 
 
 class AppConfig:
@@ -61,11 +64,14 @@ class AppConfig:
                 data = json.loads(cls.DB_CONFIG_FILE.read_text(encoding="utf-8"))
                 custom = data.get("custom_db_path", "").strip()
                 if custom:
-                    candidate = Path(custom)
-                    print(f"[CONFIG] Chemin base de données configuré : {candidate}")
+                    candidate = Path(custom).expanduser()
+                    if not candidate.is_absolute():
+                        # Un chemin relatif dépendrait du dossier courant du poste
+                        candidate = cls._runtime_dir() / candidate
+                    logger.info("Chemin base de données configuré : %s", candidate)
                     return candidate
             except Exception as e:
-                print(f"[WARN] Lecture db_config.json échouée : {e}")
+                logger.warning("Lecture db_config.json échouée : %s", e)
 
         runtime_db = cls._runtime_dir() / "db.sqlite3"
 
@@ -73,24 +79,24 @@ class AppConfig:
         # (portable: la donnée suit le dossier dist lors d'une copie sur un autre poste).
         if getattr(sys, "frozen", False):
             if runtime_db.exists():
-                print(f"[OK] Base exécutable trouvée: {runtime_db}")
+                logger.info("Base exécutable trouvée: %s", runtime_db)
             else:
-                print(f"[WARN] Aucune base exécutable, utilisation: {runtime_db}")
+                logger.warning("Aucune base exécutable, utilisation: %s", runtime_db)
             return runtime_db
 
         env_db_path = os.getenv(cls.DB_ENV_VAR, "").strip().strip('"').strip("'")
         if env_db_path:
             candidate = Path(env_db_path).expanduser()
             if candidate.exists():
-                print(f"[OK] Base de données (env {cls.DB_ENV_VAR}) trouvée: {candidate}")
+                logger.info("Base de données (env %s) trouvée: %s", cls.DB_ENV_VAR, candidate)
                 return candidate
-            print(f"[WARN] Chemin env {cls.DB_ENV_VAR} introuvable: {candidate}")
+            logger.warning("Chemin env %s introuvable: %s", cls.DB_ENV_VAR, candidate)
 
         user_db = Path(os.getenv("LOCALAPPDATA", str(cls.APP_ROOT))) / "CNPSAccueil" / "db.sqlite3"
 
         for db_path in [runtime_db, *cls.DB_PATHS, user_db]:
             if db_path.exists():
-                print(f"[OK] Base de données trouvée: {db_path}")
+                logger.info("Base de données trouvée: %s", db_path)
                 return db_path
 
         # Si aucune base n'existe, choisir un emplacement writable
@@ -102,7 +108,7 @@ class AppConfig:
             user_dir.mkdir(parents=True, exist_ok=True)
             default_path = user_db
 
-        print(f"[WARN] Aucune base trouvée, utilisation: {default_path}")
+        logger.warning("Aucune base trouvée, utilisation: %s", default_path)
         return default_path
 
     @staticmethod
@@ -131,9 +137,9 @@ class AppConfig:
         """
         style_path = cls.APP_ROOT / "sidebar" / "style.qss"
         if style_path.exists():
-            print(f"[OK] Style trouvé: {style_path}")
+            logger.debug("Style trouvé: %s", style_path)
             return style_path
-        print(f"[WARN] Style non trouvé: {style_path}")
+        logger.warning("Style non trouvé: %s", style_path)
         return None
 
     @classmethod

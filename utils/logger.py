@@ -3,23 +3,35 @@
 
 import logging
 import logging.handlers
+import sys
+import tempfile
 from pathlib import Path
-from datetime import datetime
 
 
 class LoggerSetup:
     """Classe pour configurer le système de logging"""
     
-    # Dossier pour les logs
-    LOG_DIR = Path(__file__).parent.parent / "logs"
-    
-    # Créer le dossier s'il n'existe pas
-    LOG_DIR.mkdir(exist_ok=True)
-    
-    # Fichiers de log
-    LOG_FILE = LOG_DIR / f"app_{datetime.now().strftime('%Y%m%d')}.log"
-    ERROR_LOG_FILE = LOG_DIR / f"error_{datetime.now().strftime('%Y%m%d')}.log"
-    
+    @staticmethod
+    def _resolve_log_dir():
+        """Dossier de logs inscriptible, sinon None (console seule)"""
+        # Gelé (PyInstaller/Nuitka): __file__ pointe vers un dossier temporaire
+        base = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent.parent
+        for candidate in (base / "logs", Path(tempfile.gettempdir()) / "cnps-accueil-logs"):
+            try:
+                candidate.mkdir(exist_ok=True)
+                with tempfile.TemporaryFile(dir=candidate):
+                    pass
+                return candidate
+            except OSError:
+                continue
+        return None
+
+    LOG_DIR = _resolve_log_dir.__func__()
+
+    # Fichiers de log (rotation quotidienne: app.log, app.log.AAAA-MM-JJ)
+    LOG_FILE = LOG_DIR / "app.log" if LOG_DIR else None
+    ERROR_LOG_FILE = LOG_DIR / "error.log" if LOG_DIR else None
+
     @classmethod
     def setup_logger(cls, name: str, level=logging.INFO) -> logging.Logger:
         """Configure et retourne un logger
@@ -44,27 +56,14 @@ class LoggerSetup:
             datefmt='%Y-%m-%d %H:%M:%S'
         )
         
-        # Handler pour tous les logs
-        file_handler = logging.handlers.RotatingFileHandler(
-            cls.LOG_FILE,
-            maxBytes=10485760,  # 10MB
-            backupCount=5,
-            encoding='utf-8'
-        )
-        file_handler.setLevel(level)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-        
-        # Handler pour les erreurs uniquement
-        error_handler = logging.handlers.RotatingFileHandler(
-            cls.ERROR_LOG_FILE,
-            maxBytes=10485760,  # 10MB
-            backupCount=5,
-            encoding='utf-8'
-        )
-        error_handler.setLevel(logging.ERROR)
-        error_handler.setFormatter(formatter)
-        logger.addHandler(error_handler)
+        if cls.LOG_DIR:
+            for fichier, niveau in ((cls.LOG_FILE, level), (cls.ERROR_LOG_FILE, logging.ERROR)):
+                handler = logging.handlers.TimedRotatingFileHandler(
+                    fichier, when='midnight', backupCount=30, encoding='utf-8', delay=True
+                )
+                handler.setLevel(niveau)
+                handler.setFormatter(formatter)
+                logger.addHandler(handler)
         
         # Handler pour la console (en développement)
         console_handler = logging.StreamHandler()
