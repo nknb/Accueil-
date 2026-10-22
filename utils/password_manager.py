@@ -3,7 +3,6 @@
 
 import bcrypt
 from .logger import auth_logger
-from typing import Optional
 
 
 class PasswordManager:

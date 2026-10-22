@@ -7,7 +7,6 @@ import json
 from contextlib import closing
 import sqlite3 as _sqlite3
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 # Bcrypt via utils/password_manager (prioritaire sur SHA256)
@@ -39,7 +38,6 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QRadioButton,
     QScrollArea,
-    QSizePolicy,
     QTabWidget,
     QCheckBox,
     QTextEdit,

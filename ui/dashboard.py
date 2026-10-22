@@ -2,8 +2,8 @@
 from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *
-from datetime import datetime, date, timedelta
-from database.models import DemandeAccueil, Service, Priorite, Statut
+from datetime import date
+from database.models import DemandeAccueil, Statut
 
 class DashboardSimple(QWidget):
     """Tableau de bord simple et épuré"""
@@ -392,8 +392,7 @@ class DashboardSimple(QWidget):
             item = QTableWidgetItem(statut)
             try:
                 item.setForeground(QColor(Statut(d.statut).color))
-            except:
-                pass
+            except Exception:                pass
             self.today_table.setItem(i, 2, item)
     
     def update_activities(self, demandes):

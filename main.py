@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 # Importer la configuration
 from config import AppConfig
 from database.connection import DatabaseConnection
-import res  # Resource file
+import res  # noqa: F401  (enregistre les ressources Qt: icônes et images)
 
 # ===== IMPORTER LA FENÊTRE PRINCIPALE =====
 try:

@@ -7,7 +7,7 @@ la logique métier pour la gestion des demandes d'accueil.
 
 import sys
 from PyQt6.QtWidgets import QMainWindow, QApplication, QPushButton, QWidget
-from PyQt6.QtCore import pyqtSlot, QFile, QTextStream, Qt, QPoint
+from PyQt6.QtCore import QFile, QTextStream, Qt, QPoint
 from PyQt6.QtCore import QIODevice
 from pathlib import Path
 

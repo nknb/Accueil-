@@ -3,17 +3,16 @@ import sys
 from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from typing import Optional
-import uuid
 
 from database.connection import db
 from database.models import (
     DemandeAccueil, Service, Motif, 
-    Priorite, Statut, Role, Permission
+    Priorite, Statut, Role
 )
 from ui.dashboard import DashboardSimple as DashboardWidget
-from ui.demande_widgets import DemandeFormWidget, DemandeTableWidget
+from ui.demande_widgets import DemandeTableWidget
 from ui.statistics import StatisticsWidget
 from ui.permissions import PermissionManager, RoleBasedAccessMixin
 

@@ -12,7 +12,6 @@ Usage :
 
 import sqlite3
 import random
-import uuid
 from datetime import datetime, timedelta, time
 
 # ── Connexion ─────────────────────────────────────────────────────────────────

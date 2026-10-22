@@ -30,11 +30,9 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QDateEdit,
     QScrollArea,
-    QApplication,
     QFileDialog,
     QLineEdit,
     QMessageBox,
-    QProgressDialog,
 )
 import os
 import platform
@@ -429,7 +427,7 @@ class _UserDetailDialog(QDialog):
             def _to_min(t):
                 if not t: return None
                 try: return int(str(t)[:2]) * 60 + int(str(t)[3:5])
-                except: return None
+                except Exception: return None
 
             waits    = [w for w in (_to_min(r.get("temps_attente")) for r in rows) if w is not None]
             avg_wait = sum(waits) / len(waits) if waits else 0.0
@@ -815,7 +813,7 @@ class _UserDetailDialog(QDialog):
 
     # ── Onglet 2 : Historique complet ─────────────────────────────────────────
     def _build_tab_history(self, stats: dict) -> QWidget:
-        from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView
+        from PyQt6.QtWidgets import QTableWidget, QHeaderView
 
         container = QWidget()
         container.setStyleSheet(f"background:{_BG_DEEP};")
@@ -1846,7 +1844,7 @@ class _ChartHandler:
         """Génère le fichier .xlsx formaté avec openpyxl."""
         import openpyxl
         from openpyxl.styles import (
-            Font, PatternFill, Alignment, Border, Side, numbers
+            Font, PatternFill, Alignment, Border, Side
         )
         from openpyxl.utils import get_column_letter
         from datetime import date as _date

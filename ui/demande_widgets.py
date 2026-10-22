@@ -3,9 +3,8 @@ from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *
 from database.models import DemandeAccueil, Service, Motif, Priorite, Statut
-from datetime import datetime, time, timedelta
-from typing import Optional, List
-import uuid
+from datetime import datetime, time
+from typing import Optional
 
 class DemandeFormWidget(QWidget):
     """Formulaire de saisie des demandes - Version complète"""
@@ -802,8 +801,7 @@ class DemandeTableWidget(QWidget):
                 priorite_item = QTableWidgetItem(priorite_text)
                 try:
                     priorite_item.setForeground(QColor(Priorite(demande.priorite).color))
-                except:
-                    pass
+                except Exception:                    pass
                 self.table.setItem(i, 5, priorite_item)
                 
                 # Statut
@@ -811,8 +809,7 @@ class DemandeTableWidget(QWidget):
                 statut_item = QTableWidgetItem(statut_text)
                 try:
                     statut_item.setForeground(QColor(Statut(demande.statut).color))
-                except:
-                    pass
+                except Exception:                    pass
                 self.table.setItem(i, 6, statut_item)
                 
                 # Temps d'attente

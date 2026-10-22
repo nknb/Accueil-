@@ -13,8 +13,7 @@ class PermissionManager:
         if user and 'role' in user:
             try:
                 self.user_role = Role(user['role'])
-            except:
-                pass
+            except Exception:                pass
     
     def has_permission(self, permission: str) -> bool:
         """Vérifie si l'utilisateur a une permission"""

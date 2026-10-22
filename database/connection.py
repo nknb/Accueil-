@@ -14,7 +14,7 @@ import random
 import logging
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict
 from datetime import datetime
 
 from config import AppConfig

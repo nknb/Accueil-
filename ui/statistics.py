@@ -3,9 +3,8 @@ from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *
 from datetime import datetime, date, timedelta
-from database.models import DemandeAccueil, Service, StatistiquesQuotidiennes
+from database.models import DemandeAccueil, Service
 from collections import defaultdict
-import math
 
 class StatisticsWidget(QWidget):
     """Widget de statistiques et rapports"""
@@ -853,8 +852,7 @@ class StatisticsWidget(QWidget):
                     # Si c'est une string, extraire l'heure
                     try:
                         hour = int(str(d.heure_arrivee).split(':')[0])
-                    except:
-                        continue
+                    except Exception:                        continue
                         
                 hourly_counts[hour] += 1
                 if d.statut == 'traite':

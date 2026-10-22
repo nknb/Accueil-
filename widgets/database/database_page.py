@@ -34,7 +34,6 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QDateEdit,
     QProgressBar,
-    QTextEdit,
     QFileDialog,
 )
 

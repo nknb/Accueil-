@@ -5,10 +5,8 @@ from datetime import datetime, time
 from PyQt6.QtCore import Qt, QTimer, QObject, QThread, pyqtSignal, QRect, QRectF
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QBrush
 from PyQt6.QtWidgets import (
-    QApplication,
     QComboBox,
     QDialog,
-    QDialogButtonBox,
     QFrame,
     QGridLayout,
     QGroupBox,
@@ -21,7 +19,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QWidget,
-    QSpinBox,
     QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
