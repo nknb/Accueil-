@@ -406,7 +406,7 @@ class LoginApp(QDialog):
                     print("🔍 Tentative d'ouverture de la fenêtre principale...")
                     self.ouvrir_fenetre_principale()
                 else:
-                    reste = self._enregistrer_echec(user[0], user[6] or 0)
+                    reste = self._enregistrer_echec(user[0])
                     self.afficher_message(f"❌ Mot de passe incorrect", "#dc3545")
                     if reste > 0:
                         self.tentative_label.setText(f"⚠️ Tentatives restantes: {reste}")
@@ -451,27 +451,28 @@ class LoginApp(QDialog):
         except Exception:
             pass
 
-    def _enregistrer_echec(self, user_id: int, echecs: int):
+    def _enregistrer_echec(self, user_id: int):
         """Compte l'échec en base; verrouille le compte au-delà du maximum.
 
         Stocké en base (pas en mémoire): relancer l'application ne remet pas le compteur à zéro.
         """
-        echecs += 1
-        verrou = None
-        if echecs >= self.max_tentatives:
-            verrou = (datetime.now() + timedelta(milliseconds=AppConfig.LOCKOUT_DURATION)).isoformat()
-            echecs = 0
+        verrou = (datetime.now() + timedelta(milliseconds=AppConfig.LOCKOUT_DURATION)).isoformat()
+        # Un seul UPDATE: l'incrément est atomique même si deux postes échouent en même temps.
+        # Pas de try/except: si l'écriture échoue, l'erreur remonte à verifier_db et la connexion reste refusée.
+        conn = self._open_db_connection()
         try:
-            conn = self._open_db_connection()
             conn.execute(
-                "UPDATE auth_user SET echecs = ?, verrouille_jusqua = ? WHERE id = ?",
-                (echecs, verrou, user_id),
+                "UPDATE auth_user SET"
+                " verrouille_jusqua = CASE WHEN echecs + 1 >= ? THEN ? ELSE verrouille_jusqua END,"
+                " echecs = CASE WHEN echecs + 1 >= ? THEN 0 ELSE echecs + 1 END"
+                " WHERE id = ?",
+                (self.max_tentatives, verrou, self.max_tentatives, user_id),
             )
             conn.commit()
+            nouveau = conn.execute("SELECT echecs FROM auth_user WHERE id = ?", (user_id,)).fetchone()[0]
+        finally:
             conn.close()
-        except Exception:
-            pass
-        return self.max_tentatives - echecs if verrou is None else 0
+        return self.max_tentatives - nouveau if nouveau else 0
     
     def ouvrir_fenetre_principale(self):
         """Ouvre la fenêtre principale après connexion réussie"""
