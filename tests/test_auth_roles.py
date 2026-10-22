@@ -66,3 +66,29 @@ def test_cinq_echecs_verrouillent_meme_avec_bon_mot_de_passe(login):
     assert verrou is not None
     login.verifier_db("manager", login.mots_de_passe["manager"])
     assert login.utilisateur is None  # refusé tant que le compte est verrouillé
+
+
+def _dialogue_utilisateur():
+    # widgets/__init__ charge le Dashboard, qui exige QtCharts (absent sur certains postes de dev)
+    pytest.importorskip("PyQt6.QtCharts")
+    from widgets.users.Main import UserFormDialog
+    return UserFormDialog
+
+
+def test_dialogue_utilisateur_applique_la_regle_de_mot_de_passe(qtbot):
+    UserFormDialog = _dialogue_utilisateur()
+    d = UserFormDialog(None, with_password=True)
+    qtbot.addWidget(d)
+    d.username_edit.setText("agent1")
+    d.password_edit.setText("faible")
+    with pytest.raises(ValueError):
+        d.get_data()
+    d.password_edit.setText("Fort2024x")
+    assert d.get_data()[2] == "Fort2024x"
+
+
+def test_modification_sans_mot_de_passe_conserve_l_ancien(qtbot):
+    UserFormDialog = _dialogue_utilisateur()
+    d = UserFormDialog(None, username="agent1", with_password=False)
+    qtbot.addWidget(d)
+    assert d.get_data()[2] is None

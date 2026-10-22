@@ -2,19 +2,14 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from contextlib import closing
 import sqlite3 as _sqlite3
 from datetime import datetime
 from typing import Optional
 
-# Bcrypt via utils/password_manager (prioritaire sur SHA256)
-try:
-    from utils.password_manager import PasswordManager as _PM
-    _BCRYPT_OK = True
-except ImportError:
-    _BCRYPT_OK = False
+from utils.password_manager import PasswordManager as _PM
+from utils.validators import InputValidator
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QFont
@@ -90,10 +85,8 @@ _TABLE_STYLE = (
 
 
 def _hash_password(password: str) -> str:
-    """Hash un mot de passe. Utilise bcrypt si disponible, sinon SHA256."""
-    if _BCRYPT_OK:
-        return _PM.hash_password(password)
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+    """Hash bcrypt (le login refuse tout autre format)."""
+    return _PM.hash_password(password)
 
 
 # ── Dialogue utilisateur ──────────────────────────────────────────────────────
@@ -173,6 +166,10 @@ class UserFormDialog(QDialog):
             raise ValueError("Le nom d'utilisateur est obligatoire.")
         if self._with_password and not password:
             raise ValueError("Le mot de passe est obligatoire.")
+        if password:  # vide = conserver l'ancien (modification)
+            valide, message = InputValidator.validate_password(password)
+            if not valide:
+                raise ValueError(message)
         return username, email, (password or None), role
 
 
@@ -440,13 +437,8 @@ class _UsersTab(QWidget):
         try:
             new_username, new_email, new_password, new_role = dialog.get_data()
         except ValueError as exc:
-            if "mot de passe" not in str(exc).lower():
-                QMessageBox.warning(self, "Utilisateur", str(exc))
-                return
-            new_username = dialog.username_edit.text().strip()
-            new_email = dialog.email_edit.text().strip()
-            new_password = None
-            new_role = dialog.role_combo.currentText().strip() or "accueil"
+            QMessageBox.warning(self, "Utilisateur", str(exc))
+            return
 
         is_admin = 1 if new_role == "admin" else 0
         if new_password:
