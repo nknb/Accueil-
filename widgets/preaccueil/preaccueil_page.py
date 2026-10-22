@@ -1003,7 +1003,7 @@ class PreAccueilPage(QMainWindow):
                 self.effacer_formulaire()
                 self._demandes_cache.clear()
                 self.load_demandes()
-                app_logger.info(f"Demande enregistrée: {demande.id} - {nom} {prenom} à {h_str}")
+                app_logger.info(f"Demande enregistrée: {demande.id} à {h_str}")
             else:
                 QMessageBox.warning(self, "Erreur", "❌ Erreur lors de l'enregistrement de la demande")
                 app_logger.error("Erreur lors de la sauvegarde de la demande")

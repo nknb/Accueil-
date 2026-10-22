@@ -1,15 +1,11 @@
-# requirements.txt
-# Dépendances du projet CNPS Accueil
+# Dépendances du projet CNPS Accueil (Python 3.11)
 
 # Interface graphique
 PyQt6==6.7.1
 PyQt6-Charts==6.7.0
 
-# Base de données
-# sqlite3 est inclus dans la bibliothèque standard Python
-
-# Sécurité - Hachage des mots de passe
+# Sécurité - hachage des mots de passe
 bcrypt==5.0.0
 
-
-
+# Export Excel (page Base de données)
+openpyxl==3.1.5

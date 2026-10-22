@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import closing
 import sqlite3 as _sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -988,9 +989,8 @@ class _ConfigTab(QWidget):
             label.setStyleSheet("color:#b45309; font-size:11px;")
             return
         try:
-            conn = _sqlite3.connect(path, timeout=5)
-            conn.execute("SELECT COUNT(*) FROM sqlite_master")
-            conn.close()
+            with closing(_sqlite3.connect(path, timeout=5)) as conn:
+                conn.execute("SELECT COUNT(*) FROM sqlite_master")
             label.setText(f"✅ Connexion réussie : {path}")
             label.setStyleSheet(
                 "color:#166534; font-size:11px; background:#dcfce7;"

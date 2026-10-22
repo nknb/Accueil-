@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import QDialog, QMessageBox, QApplication
 from PyQt6.QtCore import QTimer, Qt, QFile, QTextStream, QIODevice, QSettings
 import sys
 import secrets
+from contextlib import closing
 from pathlib import Path
 import sqlite3
 import warnings
@@ -676,13 +677,12 @@ class LoginApp(QDialog):
             # Vérification TOUJOURS sur la base locale (indépendante du chemin configuré)
             local_db = AppConfig._runtime_dir() / "db.sqlite3"
             try:
-                conn = sqlite3.connect(str(local_db), timeout=5)
-                row = conn.execute(
-                    "SELECT password, role, is_superuser FROM auth_user "
-                    "WHERE username = ? AND is_active = 1",
-                    (username,),
-                ).fetchone()
-                conn.close()
+                with closing(sqlite3.connect(str(local_db), timeout=5)) as conn:
+                    row = conn.execute(
+                        "SELECT password, role, is_superuser FROM auth_user "
+                        "WHERE username = ? AND is_active = 1",
+                        (username,),
+                    ).fetchone()
             except Exception as exc:
                 lbl_err.setText(f"Erreur accès base locale : {exc}")
                 lbl_err.setVisible(True)

@@ -4,7 +4,7 @@
 
 set -e
 
-PYTHON="$(dirname "$0")/venv_py311/bin/python"
+PYTHON="${PYTHON:-python}"  # PyQt6 n'est pas supporté par Nuitka sous macOS: compiler sous Windows
 PROJECT="$(dirname "$0")"
 
 echo "==> Compilation Nuitka — CNPS Accueil"
@@ -23,8 +23,6 @@ cd "$PROJECT"
     --include-data-dir=widgets=widgets \
     --include-data-dir=utils=utils \
     --include-data-files=res.py=res.py \
-    --include-data-files=db.sqlite3=db.sqlite3 \
-    --include-data-files=db_config.json=db_config.json \
     --nofollow-import-to=tkinter \
     --nofollow-import-to=matplotlib \
     --nofollow-import-to=scipy \

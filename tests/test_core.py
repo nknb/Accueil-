@@ -1,21 +1,11 @@
 """Tests du coeur: mots de passe, ids de demandes, permissions, passage en non_traite.
 
-Lancer: python -m unittest discover tests
+Lancer: python -m pytest
 """
-import sys
-import tempfile
 import unittest
 from datetime import datetime, timedelta
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-# Base temporaire: doit être fixée AVANT l'import de database.* (qui crée `db` à l'import)
-_TMP = tempfile.TemporaryDirectory()
-from config import AppConfig  # noqa: E402
-
-AppConfig.get_db_path = classmethod(lambda cls: Path(_TMP.name) / "test.sqlite3")
-
+# La base temporaire est fixée dans conftest.py
 from database.connection import db  # noqa: E402
 from database.models import DemandeAccueil, Permission, Role  # noqa: E402
 from utils.password_manager import PasswordManager  # noqa: E402
