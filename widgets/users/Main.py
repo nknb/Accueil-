@@ -228,6 +228,14 @@ class _UsersTab(QWidget):
         self._search_timer.setInterval(250)
         self._search_timer.timeout.connect(self._apply_filter)
         self._refresh_table()
+        self._deja_affiche = False
+
+    def showEvent(self, event) -> None:
+        """Relit les comptes à chaque retour sur l'onglet (un autre poste a pu en créer ou en supprimer)."""
+        super().showEvent(event)
+        if self._deja_affiche:
+            self._refresh_table()
+        self._deja_affiche = True
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)

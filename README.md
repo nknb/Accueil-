@@ -41,6 +41,16 @@ Le chemin est résolu dans cet ordre :
 
 `db.sqlite3` contient des données personnelles : il n'est jamais commité ni embarqué dans un build. Le schéma est créé automatiquement au démarrage. `python seed_data.py` génère des données de démonstration ; il refuse de s'exécuter si la base contient déjà des demandes, sauf avec `--force`.
 
+## Fonctionnement multi-postes
+
+Plusieurs postes lisent et écrivent le même fichier SQLite. Pour rester fluide :
+
+- **Pas de rechargement inutile** : chaque page compare `db.change_token()` à la valeur précédente et ne relit rien si elle est identique. Ce jeton est un compteur (`app_meta.version`) que des déclencheurs SQL font avancer à chaque écriture sur les demandes, services et motifs ; il ne dépend pas de l'horloge des postes.
+- **Écritures sérialisées** : `BEGIN IMMEDIATE`, nouvel essai avec délai croissant si la base est verrouillée, numéro de demande calculé dans l'`INSERT`.
+- **Conflits** : un traitement déjà fait ailleurs est refusé (« déjà traitée depuis un autre poste ») ; la modification d'une demande depuis la page Base de données est refusée si la ligne a changé entre-temps.
+- **Requêtes indexables** : les filtres de date s'écrivent `date >= ? AND date < ?` (jamais `DATE(date) = ?`).
+- **Recherche** : la fonction SQL `PYLOWER` rend la recherche insensible à la casse, accents compris.
+
 ## Tests
 
 ```bash

@@ -38,6 +38,7 @@ Python 3.11, PyQt6 + QtCharts, SQLite (stdlib), bcrypt, openpyxl (export Excel).
 - **Rôles** (`database/models.py:Permission`, `sidebar/main_windows.py:_apply_role_permissions`): admin, manager, accueil, preaccueil. Les pages Base de données et Utilisateurs sont réservées à l'admin.
 - **Base de données**: `db.sqlite3` contient des données personnelles réelles. Elle n'est jamais commitée ni embarquée dans un build. `db_config.json` est local (modèle: `db_config.example.json`).
 - **Numéro de demande**: calculé dans l'INSERT (`DemandeAccueil.save`), pour éviter les doublons entre postes.
+- **Multi-postes**: `db.change_token()` (compteur `app_meta.version`, déclencheurs SQL) sert aux pages à ne recharger que si les données ont changé: toute nouvelle page à rafraîchissement automatique doit l'utiliser. Filtres de date en `date >= ? AND date < ?` (jamais `DATE(date) = ?`, qui désactive l'index). Un traitement ou une modification doit être atomique (clause `WHERE` sur l'état lu) et signaler le conflit. Un `QTimer`/signal se connecte à une méthode liée, pas à une `lambda` qui capture `self`.
 
 ## Workflow obligatoire
 `/ecc:plan` → tdd-workflow → `/python-review` → vérification (`python -m pytest`, lancement de l'app)

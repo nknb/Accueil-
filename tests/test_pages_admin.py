@@ -235,3 +235,18 @@ def test_recherche_ignore_la_casse_des_caracteres_accentues():
         clause, params = _where(_Filtres(cols=(("prenom", saisie),)))
         n = db.execute_query(f"SELECT COUNT(*) AS n FROM accueil_demandeaccueil d LEFT JOIN accueil_service s ON d.service_demande_id = s.id LEFT JOIN accueil_motif m ON d.motif_id = m.id{clause}", tuple(params))[0]["n"]
         assert n == 1, saisie
+
+
+def test_liste_utilisateurs_se_rafraichit_au_retour_sur_l_onglet(qtbot):
+    """Un compte créé depuis un autre poste doit apparaître quand on revient sur l'onglet."""
+    from database.connection import db
+    from widgets.users.Main import _UsersTab
+    db.execute_update("DELETE FROM auth_user")
+    tab = _UsersTab()
+    qtbot.addWidget(tab)
+    tab.show()
+    avant = tab.table.rowCount()
+    db.execute_insert("INSERT INTO auth_user (username, password, role, date_joined) VALUES ('autre_poste', 'x', 'accueil', '2000-01-01')")
+    tab.hide()
+    tab.show()
+    assert tab.table.rowCount() == avant + 1

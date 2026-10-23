@@ -1053,8 +1053,8 @@ class DatabasePage(QMainWindow):
                     item.setFont(QFont("", 9, QFont.Weight.Bold))
                 elif key == "priorite":
                     bg_hex, fg_hex = _PRIO_COLORS.get(text.lower(), ("#6b7280", "#ffffff"))
-                    item.setBackground(QBrush(QColor(bg_hex)))
-                    item.setForeground(QBrush(QColor(fg_hex)))
+                    # Texte coloré: le fond d'item est écrasé par le QSS global (texte blanc sur blanc)
+                    item.setForeground(QBrush(QColor(bg_hex)))
                     item.setFont(QFont("", 9, QFont.Weight.Bold))
                 elif key == "satisfaction" and text:
                     try:
