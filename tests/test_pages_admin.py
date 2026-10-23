@@ -225,15 +225,15 @@ def test_modification_utilisateur_concurrente_et_dernier_admin(users_tab, monkey
 def test_recherche_ignore_la_casse_des_caracteres_accentues():
     """Régression: LIKE de SQLite ne compare la casse que sur l'ASCII (« é » ne trouvait pas « É »)."""
     from database.connection import db
-    from widgets.database.database_page import _Filtres, _where
+    from widgets.database.database_page import _SQL_FROM, _Filtres, _where
     db.execute_update("DELETE FROM accueil_demandeaccueil")
     db.execute_insert("INSERT INTO accueil_demandeaccueil (id, nom, prenom, date) VALUES ('900', 'KONE', 'ÉLODIE', '2026-05-01')")
     for saisie in ("élodie", "Élodie", "éLODIE"):
         clause, params = _where(_Filtres(search=saisie))
-        n = db.execute_query(f"SELECT COUNT(*) AS n FROM accueil_demandeaccueil d LEFT JOIN accueil_service s ON d.service_demande_id = s.id LEFT JOIN accueil_motif m ON d.motif_id = m.id{clause}", tuple(params))[0]["n"]
+        n = db.execute_query(f"SELECT COUNT(*) AS n {_SQL_FROM}{clause}", tuple(params))[0]["n"]
         assert n == 1, saisie
         clause, params = _where(_Filtres(cols=(("prenom", saisie),)))
-        n = db.execute_query(f"SELECT COUNT(*) AS n FROM accueil_demandeaccueil d LEFT JOIN accueil_service s ON d.service_demande_id = s.id LEFT JOIN accueil_motif m ON d.motif_id = m.id{clause}", tuple(params))[0]["n"]
+        n = db.execute_query(f"SELECT COUNT(*) AS n {_SQL_FROM}{clause}", tuple(params))[0]["n"]
         assert n == 1, saisie
 
 

@@ -571,10 +571,12 @@ class DemandeAccueil:
             logger.error("Erreur lors de la récupération de la demande: %s", e)
             return None
     
-    def marquer_traite(self):
-        """Marque la demande comme traitée"""
+    def marquer_traite(self, agent_id: Optional[int] = None):
+        """Marque la demande comme traitée; `agent_id` = utilisateur connecté (traçabilité)."""
         self.statut = 'traite'
         self.traite_le = datetime.now()
+        if agent_id is not None:
+            self.agent_accueil_id = agent_id
         if not self.heure_reception:
             self.heure_reception = datetime.now().time()
         self.calculer_temps_attente()

@@ -608,14 +608,17 @@ def plage_jour(jour_iso: str) -> tuple:
     return jour.isoformat(), (jour + timedelta(days=1)).isoformat()
 
 
-def marquer_traitee(demande_id, valeurs: tuple, role) -> int:
+def marquer_traitee(demande_id, valeurs: tuple, role, agent_id=None) -> int:
     """UPDATE du traitement d'une demande; renvoie le nombre de lignes modifiées.
 
     Pour le rôle 'accueil' la clause WHERE exige statut != 'traite' (atomique): si un autre
-    poste a déjà traité la demande, 0 ligne est modifiée. Admin/manager gardent le droit de modifier.
-    `valeurs` = (heure_reception, satisfaction, commentaire, temps_attente, delai_objectif, updated_at).
+    poste a déjà traité la demande, 0 ligne est modifiée (l'agent d'origine est donc conservé).
+    Admin/manager gardent le droit de modifier et deviennent alors l'agent enregistré.
+    `valeurs` = (heure_reception, satisfaction, commentaire, temps_attente, delai_objectif, updated_at);
+    `agent_id` = id de l'utilisateur connecté (traçabilité: agent_accueil_id), inchangé s'il est inconnu (None).
     """
     garde = " AND COALESCE(statut, '') != 'traite'" if role == "accueil" else ""
+    valeurs = tuple(valeurs)
     return db.execute_update(
         """
         UPDATE accueil_demandeaccueil
@@ -625,10 +628,21 @@ def marquer_traitee(demande_id, valeurs: tuple, role) -> int:
             temps_attente = ?,
             delai_objectif = ?,
             statut = 'traite',
-            updated_at = ?
+            updated_at = ?,
+            traite_le = ?,
+            agent_accueil_id = COALESCE(?, agent_accueil_id)
         WHERE id = ?""" + garde,
-        tuple(valeurs) + (demande_id,),
+        valeurs + (valeurs[-1], agent_id, demande_id),
     )
+
+
+def agent_du_traitement(demande_id):
+    """Identifiant de connexion de l'agent qui a traité la demande; None si inconnu (non traitée, compte supprimé)."""
+    lignes = db.execute_query(
+        "SELECT u.username FROM accueil_demandeaccueil d JOIN auth_user u ON u.id = d.agent_accueil_id WHERE d.id = ?",
+        (demande_id,),
+    )
+    return lignes[0]["username"] if lignes else None
 
 
 class AccueilDemandesWorker(QObject):
@@ -698,6 +712,7 @@ class AccueilPage(QMainWindow):
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
         self.current_user_role = None
+        self.current_user_id = None
         self._refresh_in_progress = False
         self._last_table_signature = None
         self._refresh_pending = False
@@ -779,6 +794,7 @@ class AccueilPage(QMainWindow):
     def set_current_user(self, user):
         role = (user or {}).get("role")
         self.current_user_role = str(role).strip().lower() if role else None
+        self.current_user_id = (user or {}).get("id")   # enregistré comme agent à chaque traitement
 
     # ── Indicateurs ───────────────────────────────────────────────────────────
 
@@ -1390,11 +1406,14 @@ class AccueilPage(QMainWindow):
                 datetime.now().isoformat(),
             ),
             self.current_user_role,
+            self.current_user_id,
         )
         if modifiees == 0:
+            par = agent_du_traitement(demande_id)
             QMessageBox.information(
                 self, "Traitement",
-                "Cette demande a déjà été traitée depuis un autre poste. La liste va être actualisée.",
+                "Cette demande a déjà été traitée" + (f" par {par}" if par else "")
+                + " depuis un autre poste. La liste va être actualisée.",
             )
         self._demandes_cache.clear()
         self.load_demandes()

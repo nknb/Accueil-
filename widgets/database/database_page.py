@@ -67,6 +67,7 @@ _VISIBLE_COLS = [
     ("heure_arrivee","Heure arrivée",  100, False),
     ("temps_attente","Temps attente",  100, False),
     ("satisfaction", "Satisfaction",   90,  False),
+    ("agent",        "Traité par",     135, False),
     ("contacts",     "Contact",        120, True),
 ]
 
@@ -157,6 +158,7 @@ _SQL_FROM = (
     "FROM accueil_demandeaccueil d"
     " LEFT JOIN accueil_service s ON d.service_demande_id = s.id"
     " LEFT JOIN accueil_motif   m ON d.motif_id = m.id"
+    " LEFT JOIN auth_user       u ON d.agent_accueil_id = u.id"
 )
 _SQL_SELECT = {
     "id": "d.id", "date": "d.date", "nom": "d.nom", "prenom": "d.prenom",
@@ -164,6 +166,8 @@ _SQL_SELECT = {
     "motif": "COALESCE(m.nom, '—')", "priorite": "d.priorite", "statut": "d.statut",
     "heure_arrivee": "d.heure_arrivee", "temps_attente": "d.temps_attente",
     "satisfaction": "d.satisfaction", "contacts": "d.contacts",
+    # agent qui a traité la demande; « (compte supprimé) » si son compte n'existe plus
+    "agent": "COALESCE(u.username, CASE WHEN d.agent_accueil_id IS NULL THEN '' ELSE '(compte supprimé)' END)",
 }
 _SQL_TEXT = dict(_SQL_SELECT, satisfaction="CAST(d.satisfaction AS TEXT)")  # pour LIKE
 _SQL_ORDER = dict(_SQL_SELECT, id="CAST(d.id AS INTEGER)")                  # tri numérique
