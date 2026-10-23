@@ -34,3 +34,29 @@ def test_dashboard_compte_par_date_de_la_demande_pas_par_modification(qtbot):
     w.finished.connect(res.append)
     w.run()
     assert res and res[0]["total_demandes"] == 1
+
+
+def test_dashboard_temps_attente_format_h_mm_ss(qtbot):
+    """L'appli écrit 'H:MM:SS' (ex. 0:12:30), pas 'HH:MM:SS': 12 min ne doit pas devenir 2 min."""
+    from datetime import date
+    from database.models import DemandeAccueil
+    from widgets.dashboard.Main import _DashboardWorker
+    jour = date(2012, 6, 7)
+    db.execute_update("DELETE FROM accueil_demandeaccueil")
+    for t in ("0:12:30", "0:45:10", "00:20:00"):
+        DemandeAccueil(nom="W", date=jour, temps_attente=t).save()
+    res = []
+    w = _DashboardWorker("2012-06-07", "2012-06-07")
+    w.finished.connect(res.append)
+    w.run()
+    d = dict(zip(res[0]["wait_labels"], res[0]["wait_counts"]))
+    assert d["≤ 15 min"] == 1 and d["15–30 min"] == 1 and d["30–60 min"] == 1
+    assert round(res[0]["avg_wait_min"], 1) == 25.7  # (12 + 45 + 20) / 3
+
+
+def test_helpers_dashboard_attente_et_heure():
+    from widgets.dashboard.Main import _minutes_attente, _heure_arrivee
+    assert _minutes_attente("0:12:30") == 12 and _minutes_attente("01:05:00") == 65
+    assert _minutes_attente("") is None and _minutes_attente("abc") is None
+    assert _heure_arrivee("2026-10-23T10:50:03.483938") == 10
+    assert _heure_arrivee("09:15:00") == 9 and _heure_arrivee(None) is None

@@ -50,6 +50,29 @@ from ui.dashboard_theme import (
 )
 
 
+# Minutes d'attente depuis 'H:MM:SS' ou 'HH:MM:SS' (l'appli écrit 0:12:30; substr fixe lisait 12 min comme 2)
+_WAIT_MIN = (
+    "(CAST(substr(temps_attente, 1, instr(temps_attente, ':') - 1) AS INT) * 60"
+    " + CAST(substr(temps_attente, instr(temps_attente, ':') + 1, 2) AS INT))"
+)
+
+
+def _minutes_attente(t) -> int | None:
+    """'H:MM:SS' ou 'HH:MM:SS' -> minutes entières; None si absent ou invalide."""
+    try:
+        h, m, _ = str(t).split(":")
+        return int(h) * 60 + int(m)
+    except (ValueError, TypeError):
+        return None
+
+
+def _heure_arrivee(value) -> int | None:
+    """Heure (0-23) d'un 'HH:MM:SS' ou d'un ISO 'AAAA-MM-JJTHH:MM:SS'; None si illisible."""
+    text = str(value or "")
+    text = text.split("T")[1] if "T" in text else text
+    return int(text[:2]) if text[:2].isdigit() else None
+
+
 # ── Worker QThread ─────────────────────────────────────────────────────────────
 
 class _DashboardWorker(QObject):
@@ -135,14 +158,10 @@ class _DashboardWorker(QObject):
             _wait_sql = f"""
                 SELECT
                   CASE
-                    WHEN (CAST(substr(temps_attente,1,2) AS INT)*60
-                          + CAST(substr(temps_attente,4,2) AS INT)) <= 15 THEN '≤ 15 min'
-                    WHEN (CAST(substr(temps_attente,1,2) AS INT)*60
-                          + CAST(substr(temps_attente,4,2) AS INT)) <= 30 THEN '15–30 min'
-                    WHEN (CAST(substr(temps_attente,1,2) AS INT)*60
-                          + CAST(substr(temps_attente,4,2) AS INT)) <= 60 THEN '30–60 min'
-                    WHEN (CAST(substr(temps_attente,1,2) AS INT)*60
-                          + CAST(substr(temps_attente,4,2) AS INT)) <= 90 THEN '60–90 min'
+                    WHEN ({_WAIT_MIN}) <= 15 THEN '≤ 15 min'
+                    WHEN ({_WAIT_MIN}) <= 30 THEN '15–30 min'
+                    WHEN ({_WAIT_MIN}) <= 60 THEN '30–60 min'
+                    WHEN ({_WAIT_MIN}) <= 90 THEN '60–90 min'
                     ELSE '> 90 min'
                   END AS tranche,
                   COUNT(*) AS nb
@@ -150,8 +169,7 @@ class _DashboardWorker(QObject):
                 WHERE temps_attente IS NOT NULL AND temps_attente != '' {and_cond}
                 GROUP BY tranche
                 ORDER BY MIN(
-                    CAST(substr(temps_attente,1,2) AS INT)*60
-                    + CAST(substr(temps_attente,4,2) AS INT)
+                    {_WAIT_MIN}
                 )
             """
             _order = ['≤ 15 min', '15–30 min', '30–60 min', '60–90 min', '> 90 min']
@@ -165,8 +183,7 @@ class _DashboardWorker(QObject):
             # Temps d'attente moyen (en minutes)
             _avg_rows = db.execute_query(
                 f"""SELECT AVG(
-                        CAST(substr(temps_attente,1,2) AS INT)*60
-                        + CAST(substr(temps_attente,4,2) AS INT)
+                        {_WAIT_MIN}
                     ) AS avg_min
                     FROM accueil_demandeaccueil d
                     WHERE temps_attente IS NOT NULL AND temps_attente != '' {and_cond}""",
@@ -424,12 +441,7 @@ class _UserDetailDialog(QDialog):
             nb_non_traite = sum(1 for r in rows if (r.get("statut") or "") == "non_traite")
 
             # ── temps d'attente ────────────────────────────────────────────
-            def _to_min(t):
-                if not t: return None
-                try: return int(str(t)[:2]) * 60 + int(str(t)[3:5])
-                except Exception: return None
-
-            waits    = [w for w in (_to_min(r.get("temps_attente")) for r in rows) if w is not None]
+            waits    = [w for w in (_minutes_attente(r.get("temps_attente")) for r in rows) if w is not None]
             avg_wait = sum(waits) / len(waits) if waits else 0.0
             min_wait = min(waits) if waits else 0
             max_wait = max(waits) if waits else 0
@@ -485,9 +497,9 @@ class _UserDetailDialog(QDialog):
                     ] += 1
                 except Exception:
                     pass
-                h_str = str(r.get("heure_arrivee") or "")[:2]
-                if h_str.isdigit():
-                    heure_cnt[int(h_str)] += 1
+                h = _heure_arrivee(r.get("heure_arrivee"))
+                if h is not None:
+                    heure_cnt[h] += 1
 
             jour_prefere   = _JOUR.get(jour_cnt.most_common(1)[0][0], "—") if jour_cnt else "—"
             heure_preferee = f"{heure_cnt.most_common(1)[0][0]:02d}h00" if heure_cnt else "—"
