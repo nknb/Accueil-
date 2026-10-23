@@ -380,9 +380,9 @@ class _UsersTab(QWidget):
                 "accueil":    ("#15803d", "#ffffff"),
                 "preaccueil": ("#b45309", "#ffffff"),
             }
-            bg, fg = colors.get(role, ("#64748b", "#ffffff"))
-            role_item.setForeground(QColor(fg))
-            role_item.setBackground(QColor(bg))
+            # Texte coloré: le fond d'item est écrasé par le QSS global (texte blanc sur blanc)
+            bg, _ = colors.get(role, ("#64748b", "#ffffff"))
+            role_item.setForeground(QColor(bg))
             self.table.setItem(row_idx, 3, role_item)
 
         self.table.setSortingEnabled(True)
