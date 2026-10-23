@@ -8,6 +8,13 @@ echo.
 
 set INSTALL_DIR=C:\CNPS\AccueilCNPS
 
+:: Supprimer la tache planifiee de sauvegarde (si elle existe)
+schtasks /Query /TN "CNPS Accueil sauvegarde" > nul 2>&1
+if %errorlevel% equ 0 (
+    schtasks /Delete /TN "CNPS Accueil sauvegarde" /F > nul
+    echo  [OK] Tache planifiee de sauvegarde supprimee
+)
+
 :: Supprimer l'application
 if exist "%INSTALL_DIR%" (
     rmdir /S /Q "%INSTALL_DIR%"

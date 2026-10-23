@@ -46,7 +46,7 @@ Le chemin est résolu dans cet ordre :
 La base est un fichier unique partagé: sans sauvegarde, une corruption ou une panne du partage fait tout perdre. La sauvegarde est une copie cohérente faite avec l'API de SQLite (les autres postes peuvent continuer à travailler), vérifiée par `PRAGMA integrity_check`, puis rangée dans le dossier `sauvegardes/` à côté de la base (`accueil-AAAAMMJJ-HHMMSS.sqlite3`). Les 30 dernières sont conservées.
 
 - **À la demande** : Utilisateurs > Configuration > « Sauvegarder maintenant » (affiche aussi la date de la dernière sauvegarde).
-- **Chaque nuit** (recommandé), sur un poste ou le serveur, en tâche planifiée Windows :
+- **Chaque nuit** (recommandé), sur un poste ou le serveur, une seule fois pour toute l'agence : clic droit > « Exécuter en tant qu'administrateur » sur `installer_windows\PLANIFIER_SAUVEGARDE.bat` (option : `PLANIFIER_SAUVEGARDE.bat 22:00 30` pour l'heure et le nombre de copies gardées). Il crée la tâche Windows « CNPS Accueil sauvegarde » avec **votre** compte (le mot de passe est demandé ; ce compte doit pouvoir écrire sur le partage de la base) et propose un essai immédiat. Équivalent à la main :
 
   ```bat
   schtasks /Create /SC DAILY /ST 22:00 /TN "CNPS Accueil sauvegarde" /TR "C:\CNPS\AccueilCNPS\AccueilCNPS.exe --sauvegarde"
