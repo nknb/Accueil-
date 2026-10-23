@@ -7,16 +7,35 @@ Insère :
   - 5 200 demandes d'accueil sur les 18 derniers mois
 
 Usage :
-    python seed_data.py
+    python seed_data.py            # refuse si la base contient déjà des demandes
+    python seed_data.py --force    # écrase les demandes, services et motifs existants
 """
 
+import os
 import sqlite3
 import random
+import sys
 from datetime import datetime, timedelta, time
 
 # ── Connexion ─────────────────────────────────────────────────────────────────
 
 DB_PATH = "db.sqlite3"
+
+
+def _base_contient_des_demandes(chemin: str) -> bool:
+    """True si la base existe et contient déjà des demandes (le script les supprimerait)."""
+    if not os.path.exists(chemin):
+        return False
+    try:
+        with sqlite3.connect(chemin) as c:
+            return c.execute("SELECT COUNT(*) FROM accueil_demandeaccueil").fetchone()[0] > 0
+    except sqlite3.Error:
+        return False
+
+
+if _base_contient_des_demandes(DB_PATH) and "--force" not in sys.argv:
+    sys.exit(f"{DB_PATH} contient déjà des demandes: ce script les supprime. Relancer avec --force pour confirmer.")
+
 conn = sqlite3.connect(DB_PATH, timeout=30)
 conn.execute("PRAGMA journal_mode = WAL")
 conn.execute("PRAGMA foreign_keys = ON")

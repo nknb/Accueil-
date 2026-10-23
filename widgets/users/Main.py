@@ -129,6 +129,7 @@ class UserFormDialog(QDialog):
         self.setWindowTitle("Utilisateur")
         self.setMinimumWidth(380)
         self._with_password = with_password
+        self._initial = (username, email)  # valeurs existantes: on ne bloque pas la modification d'un compte ancien
 
         self.username_edit = QLineEdit(self)
         self.username_edit.setText(username)
@@ -185,6 +186,14 @@ class UserFormDialog(QDialog):
         role = self.role_combo.currentText().strip() or "accueil"
         if not username:
             raise ValueError("Le nom d'utilisateur est obligatoire.")
+        if username != self._initial[0]:
+            valide, message = InputValidator.validate_username(username)
+            if not valide:
+                raise ValueError(message)
+        if email and email != self._initial[1]:
+            valide, message = InputValidator.validate_email(email)
+            if not valide:
+                raise ValueError(message)
         if self._with_password and not password:
             raise ValueError("Le mot de passe est obligatoire.")
         if password:  # vide = conserver l'ancien (modification)

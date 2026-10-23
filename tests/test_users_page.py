@@ -132,3 +132,36 @@ def test_valider_demande_refuse_les_saisies_invalides():
     assert valider_demande({**ok, "satisfaction": "abc"})
     assert valider_demande({**ok, "satisfaction": "4"}) is None
     assert valider_demande({**ok, "priorite": "urgente"})
+
+
+def test_seed_data_refuse_d_ecraser_une_base_existante(tmp_path):
+    import sqlite3, subprocess, sys, pathlib
+    base = tmp_path / "db.sqlite3"
+    with sqlite3.connect(base) as c:
+        c.execute("CREATE TABLE accueil_demandeaccueil (id TEXT)")
+        c.execute("INSERT INTO accueil_demandeaccueil VALUES ('1')")
+    script = pathlib.Path(__file__).resolve().parent.parent / "seed_data.py"
+    r = subprocess.run([sys.executable, "-I", str(script)], cwd=tmp_path, capture_output=True, text=True)
+    assert r.returncode != 0 and "--force" in (r.stdout + r.stderr)
+    with sqlite3.connect(base) as c:
+        assert c.execute("SELECT COUNT(*) FROM accueil_demandeaccueil").fetchone()[0] == 1
+
+
+def test_formulaire_utilisateur_valide_identifiant_et_email(qtbot):
+    import pytest
+    from widgets.users.Main import UserFormDialog
+    d = UserFormDialog(None, with_password=True)
+    qtbot.addWidget(d)
+    d.password_edit.setText("Valide#Mdp2024")
+    for nom in ("a", "avec espace", "x" * 21):
+        d.username_edit.setText(nom)
+        with pytest.raises(ValueError):
+            d.get_data()
+    d.username_edit.setText("agent_01")
+    d.email_edit.setText("pas-un-email")
+    with pytest.raises(ValueError):
+        d.get_data()
+    d.email_edit.setText("")                       # e-mail optionnel
+    assert d.get_data()[0] == "agent_01"
+    d.email_edit.setText("agent@cnps.ci")
+    assert d.get_data()[1] == "agent@cnps.ci"
