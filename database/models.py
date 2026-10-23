@@ -360,7 +360,7 @@ class DemandeAccueil:
         if self.updated_at is None:
             self.updated_at = datetime.now()
 
-    _MIN_ID_BASE = 943  # plancher: le premier id attribué est 944
+    _MIN_ID_BASE = 943  # plancher: le premier id attribué est 944; les ids > 9 car. sont ignorés (CAST débordait)
 
     @staticmethod
     def _compute_delai_objectif_from_wait_time(wait_time: Optional[str]) -> int:
@@ -493,7 +493,7 @@ class DemandeAccueil:
                     placeholders = ', '.join(['?'] * len(data))
                     query = (
                         f"INSERT INTO accueil_demandeaccueil (id, {columns}) "
-                        f"SELECT CAST(MAX(COALESCE(MAX(CAST(id AS INTEGER)), 0), {self._MIN_ID_BASE}) + 1 AS TEXT), "
+                        f"SELECT CAST(MAX(COALESCE(MAX(CASE WHEN length(id) <= 9 THEN CAST(id AS INTEGER) END), 0), {self._MIN_ID_BASE}) + 1 AS TEXT), "
                         f"{placeholders} FROM accueil_demandeaccueil"
                     )
                     rowid = db.execute_insert(query, tuple(data.values()))

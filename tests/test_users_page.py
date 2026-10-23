@@ -93,3 +93,42 @@ def test_preaccueil_ne_propose_pas_les_services_et_motifs_inactifs(qtbot):
     motifs = [page.combo_motif.itemText(i) for i in range(page.combo_motif.count())]
     assert "SvcInactif" not in services and "MotifInactif" not in motifs
     assert len(services) > 1 and len(motifs) > 1  # les actifs restent proposés
+
+
+def test_test_connexion_refuse_un_chemin_inexistant(tmp_path):
+    from widgets.users.Main import verifier_chemin_base
+    absent = tmp_path / "nouveau.sqlite3"
+    ok, _ = verifier_chemin_base(str(absent))
+    assert not ok and not absent.exists()        # et ne crée aucun fichier
+    vide = tmp_path / "vide.sqlite3"
+    import sqlite3
+    sqlite3.connect(vide).close()
+    assert not verifier_chemin_base(str(vide))[0]  # pas une base de l'appli
+    ok, _ = verifier_chemin_base(str(db.db_path))
+    assert ok
+
+
+def test_id_sequentiel_survit_a_un_id_manuel_de_20_chiffres():
+    """Régression: un id horodaté de 20 chiffres faisait déborder CAST(id AS INTEGER)."""
+    from database.models import DemandeAccueil
+    db.execute_update("DELETE FROM accueil_demandeaccueil")
+    db.execute_insert("INSERT INTO accueil_demandeaccueil (id, nom, date) VALUES ('20261023121617686172', 'x', '2026-01-01')")
+    ids = []
+    for n in "ABC":
+        d = DemandeAccueil(nom=n)
+        assert d.save()
+        ids.append(d.id)
+    assert ids == ["944", "945", "946"]
+
+
+def test_valider_demande_refuse_les_saisies_invalides():
+    from widgets.database.database_page import valider_demande
+    ok = {"date": "2026-05-01", "nom": "KONE", "satisfaction": None, "priorite": "haute"}
+    assert valider_demande(ok) is None
+    assert valider_demande({**ok, "nom": None})                       # nom obligatoire
+    assert valider_demande({**ok, "date": "01/05/2026"})              # date ISO
+    assert valider_demande({**ok, "date": None})
+    assert valider_demande({**ok, "satisfaction": "9"})               # 1 à 5
+    assert valider_demande({**ok, "satisfaction": "abc"})
+    assert valider_demande({**ok, "satisfaction": "4"}) is None
+    assert valider_demande({**ok, "priorite": "urgente"})

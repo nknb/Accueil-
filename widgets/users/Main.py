@@ -6,6 +6,7 @@ import json
 from contextlib import closing
 import sqlite3 as _sqlite3
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from utils.password_manager import PasswordManager as _PM
@@ -93,6 +94,20 @@ def retire_admin_autorise(uid) -> bool:
     """False si `uid` est le dernier administrateur actif (le supprimer ou le rétrograder bloquerait l'appli)."""
     admins = db.execute_query("SELECT id FROM auth_user WHERE role = 'admin' AND is_active = 1")
     return not any(str(a["id"]) == str(uid) for a in admins) or len(admins) > 1
+
+
+def verifier_chemin_base(path: str) -> tuple[bool, str]:
+    """Teste une base existante en lecture seule (sqlite3.connect créerait sinon un fichier vide)."""
+    if not path:
+        return False, "Chemin vide."
+    if not Path(path).is_file():
+        return False, "Fichier introuvable."
+    try:
+        with closing(_sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as conn:
+            conn.execute("SELECT 1 FROM auth_user LIMIT 1")
+    except Exception as exc:
+        return False, f"Base de l'application invalide : {exc}"
+    return True, ""
 
 
 # ── Dialogue utilisateur ──────────────────────────────────────────────────────
@@ -990,20 +1005,15 @@ class _ConfigTab(QWidget):
 
     @staticmethod
     def _run_test(path: str, label: QLabel):
-        if not path:
-            label.setText("⚠️ Chemin vide.")
-            label.setStyleSheet("color:#b45309; font-size:11px;")
-            return
-        try:
-            with closing(_sqlite3.connect(path, timeout=5)) as conn:
-                conn.execute("SELECT COUNT(*) FROM sqlite_master")
+        ok, erreur = verifier_chemin_base(path)
+        if ok:
             label.setText(f"✅ Connexion réussie : {path}")
             label.setStyleSheet(
                 "color:#166534; font-size:11px; background:#dcfce7;"
                 " border-radius:5px; padding:4px 8px;"
             )
-        except Exception as exc:
-            label.setText(f"❌ Échec : {exc}")
+        else:
+            label.setText(f"❌ Échec : {erreur}")
             label.setStyleSheet(
                 "color:#991b1b; font-size:11px; background:#fee2e2;"
                 " border-radius:5px; padding:4px 8px;"
@@ -1015,6 +1025,12 @@ class _ConfigTab(QWidget):
         if not path:
             QMessageBox.warning(self, "Chemin vide", "Veuillez saisir un chemin de base de données.")
             return
+        # La base locale par défaut peut ne pas exister encore (créée au démarrage)
+        if Path(path) != AppConfig._runtime_dir() / "db.sqlite3":
+            ok, erreur = verifier_chemin_base(path)
+            if not ok:
+                QMessageBox.warning(self, "Chemin refusé", f"{erreur}\n\nUn chemin faux ferait créer une base vide au prochain démarrage.")
+                return
         try:
             config = {"custom_db_path": path}
             AppConfig.DB_CONFIG_FILE.write_text(

@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
 
 from config import AppConfig
 from database.connection import db
+from database.models import DemandeAccueil
 
 
 # ── Colonnes visibles ─────────────────────────────────────────────────────────
@@ -170,6 +171,31 @@ class _ReloadWorker(QObject):
             self.failed.emit(str(exc))
 
 
+_PRIORITES = ("normale", "moyenne", "haute")
+
+
+def valider_demande(p: dict) -> Optional[str]:
+    """Message d'erreur si la saisie est invalide, sinon None (date ISO, nom, satisfaction 1-5, priorité connue)."""
+    if not p.get("nom"):
+        return "Le nom est obligatoire."
+    try:
+        datetime.strptime(p.get("date") or "", "%Y-%m-%d")
+    except ValueError:
+        return "La date est obligatoire, au format AAAA-MM-JJ."
+    heure = p.get("heure_arrivee")
+    if heure:
+        try:
+            datetime.strptime(heure, "%H:%M:%S" if heure.count(":") == 2 else "%H:%M")
+        except ValueError:
+            return "L'heure d'arrivée doit être au format HH:MM:SS."
+    sat = p.get("satisfaction")
+    if sat and (not sat.isdigit() or not 1 <= int(sat) <= 5):
+        return "La satisfaction doit être un entier de 1 à 5."
+    if p.get("priorite") and p["priorite"] not in _PRIORITES:
+        return "Priorité inconnue."
+    return None
+
+
 # ── Dialogue CRUD (champs sélectifs) ─────────────────────────────────────────
 
 class _RecordDialog(QDialog):
@@ -214,7 +240,7 @@ class _RecordDialog(QDialog):
         self._contacts = _le("contacts")
         self._arrivee  = _le("heure_arrivee", datetime.now().strftime("%H:%M:%S"))
         self._statut   = _cb("statut",   ["en_attente", "en_cours", "traite", "non_traite"])
-        self._priorite = _cb("priorite", ["normale", "moyenne", "haute", "urgente"])
+        self._priorite = _cb("priorite", list(_PRIORITES))
         self._sat      = _le("satisfaction", "")
 
         form.addRow("Date *",          self._date)
@@ -233,9 +259,16 @@ class _RecordDialog(QDialog):
         )
         buttons.button(QDialogButtonBox.StandardButton.Save).setStyleSheet(_BTN_PRIMARY)
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setStyleSheet(_BTN_NEUTRAL)
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._valider)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+
+    def _valider(self) -> None:
+        erreur = valider_demande(self.payload())
+        if erreur:
+            QMessageBox.warning(self, "Saisie invalide", erreur)
+            return
+        self.accept()
 
     def payload(self) -> dict:
         def _val(w):
@@ -590,7 +623,7 @@ class DatabasePage(QMainWindow):
                 w = QComboBox(frame)
                 w.setStyleSheet(_FILTER_ROW_STYLE)
                 w.addItem("Toutes", "")
-                for p in ["normale", "moyenne", "haute", "urgente"]:
+                for p in list(_PRIORITES):
                     w.addItem(p, p)
                 w.currentIndexChanged.connect(lambda _: self._apply_filters(reset_page=True))
             elif key == "service":
@@ -1168,16 +1201,13 @@ class DatabasePage(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         p = dlg.payload()
-        p["created_at"] = datetime.now().isoformat()
-        p["updated_at"] = datetime.now().isoformat()
-        p["id"] = datetime.now().strftime("%Y%m%d%H%M%S%f")
-        cols = [k for k, v in p.items() if v is not None]
-        vals = [p[k] for k in cols]
+        sat = p.pop("satisfaction")
+        for k in ("nom", "prenom", "numero_cnps", "contacts"):
+            p[k] = p[k] or ""
         try:
-            db.execute_insert(
-                f"INSERT INTO {self.TABLE} ({', '.join(cols)}) VALUES ({', '.join(['?']*len(cols))})",
-                tuple(vals),
-            )
+            ok = DemandeAccueil(**p, satisfaction=int(sat) if sat else None).save()
+            if not ok:
+                raise RuntimeError("enregistrement refusé, voir le journal")
             self._invalidate_and_reload()
         except Exception as exc:
             QMessageBox.critical(self, "CRUD", f"Échec création : {exc}")
