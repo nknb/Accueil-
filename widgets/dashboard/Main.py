@@ -71,7 +71,7 @@ class _DashboardWorker(QObject):
     def run(self) -> None:
         """Exécute toutes les requêtes SQL hors thread UI."""
         try:
-            and_cond = "AND date(COALESCE(d.updated_at, d.created_at, d.date)) BETWEEN ? AND ?"
+            and_cond = "AND date(COALESCE(d.date, d.created_at)) BETWEEN ? AND ?"
             params   = (self._date_from, self._date_to)
 
             total_demandes = 0
@@ -205,9 +205,9 @@ class _DashboardWorker(QObject):
             _dow_raw: dict[str, float] = {}
             for row in db.execute_query(
                 f"""SELECT
-                        strftime('%w', date(COALESCE(d.updated_at, d.created_at, d.date))) AS dow,
+                        strftime('%w', date(COALESCE(d.date, d.created_at))) AS dow,
                         CAST(COUNT(*) AS REAL)
-                          / COUNT(DISTINCT date(COALESCE(d.updated_at, d.created_at, d.date)))
+                          / COUNT(DISTINCT date(COALESCE(d.date, d.created_at)))
                           AS avg_day
                     FROM accueil_demandeaccueil d
                     WHERE 1=1 {and_cond}
@@ -2240,7 +2240,7 @@ class _ChartHandler:
         ws4 = wb.create_sheet("Données brutes")
         ws4.sheet_view.showGridLines = False
 
-        and_cond = "AND date(COALESCE(d.updated_at, d.created_at, d.date)) BETWEEN ? AND ?"
+        and_cond = "AND date(COALESCE(d.date, d.created_at)) BETWEEN ? AND ?"
         raw_rows = db.execute_query(
             f"""SELECT d.date, d.nom, d.prenom, d.numero_cnps,
                        s.nom AS service, m.nom AS motif,

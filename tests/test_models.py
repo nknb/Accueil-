@@ -72,3 +72,11 @@ class TestSave(unittest.TestCase):
         d = DemandeAccueil(id="99999", nom="X")
         self.assertTrue(d.save())
         self.assertEqual(DemandeAccueil.get_by_id("99999").nom, "X")
+
+
+class TestStatutEnum(unittest.TestCase):
+    def test_tous_les_statuts_ecrits_en_base_sont_dans_l_enum(self):
+        """Le rollover écrit 'non_traite': l'UI fait Statut(valeur) et ne doit pas lever."""
+        from database.models import Statut
+        self.assertEqual(Statut("non_traite").value, "non_traite")
+        self.assertIn("Non traité", str(Statut("non_traite")))

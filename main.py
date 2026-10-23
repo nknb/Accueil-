@@ -5,6 +5,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtWidgets import QDialog, QMessageBox, QApplication
 from PyQt6.QtCore import QTimer, Qt, QFile, QTextStream, QIODevice, QSettings
 import sys
+import logging
 import secrets
 from contextlib import closing
 from pathlib import Path
@@ -218,6 +219,8 @@ def log_runtime_db_path(db_path: Path):
     except Exception:
         pass
 
+logger = logging.getLogger("CNPS-Accueil.Login")
+
 # ===== PARTIE 3: LOGIQUE DE CONNEXION =====
 class LoginApp(QDialog):
     """Fenêtre de connexion à l'application CNPS Accueil
@@ -309,6 +312,7 @@ class LoginApp(QDialog):
 
     def creer_utilisateurs_defaut(self):
         """Crée les utilisateurs par défaut s'ils n'existent pas"""
+        conn = None
         try:
             conn = self._open_db_connection()
             cursor = conn.cursor()
@@ -342,9 +346,11 @@ class LoginApp(QDialog):
                     self, "Comptes créés",
                     "Notez ces mots de passe, ils ne seront plus affichés :\n\n" + "\n".join(crees),
                 )
-            conn.close()
-        except Exception as e:
-            print(f"❌ Erreur création utilisateurs: {e}")
+        except Exception:
+            logger.exception("Erreur création utilisateurs")
+        finally:
+            if conn is not None:
+                conn.close()
     
     def se_connecter(self):
         """Déclenche la vérification de connexion"""
@@ -373,15 +379,12 @@ class LoginApp(QDialog):
             mot_de_passe: Le mot de passe
         """
         try:
-            conn = self._open_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, username, password, email, role, is_superuser, echecs, verrouille_jusqua
-                FROM auth_user
-                WHERE username = ? AND is_active = 1
-            """, (identifiant,))
-            user = cursor.fetchone()
-            conn.close()
+            with closing(self._open_db_connection()) as conn:
+                user = conn.execute("""
+                    SELECT id, username, password, email, role, is_superuser, echecs, verrouille_jusqua
+                    FROM auth_user
+                    WHERE username = ? AND is_active = 1
+                """, (identifiant,)).fetchone()
 
             if user and user[7] and user[7] > datetime.now().isoformat():
                 self.afficher_message("⛔ Compte verrouillé, réessayez plus tard", "#dc3545")
@@ -434,7 +437,7 @@ class LoginApp(QDialog):
                 )
             else:
                 self.afficher_message(f"❌ Erreur: {str(e)}", "#dc3545")
-            print(f"❌ Erreur base de données: {e}")
+            logger.error("Erreur base de données à la connexion: %s", e)
         finally:
             self.ui.pushButton.setEnabled(True)
             self.ui.pushButton.setText("Connexion")
@@ -442,15 +445,14 @@ class LoginApp(QDialog):
     def _maj_apres_connexion(self, user_id: int):
         """Date de dernière connexion + remise à zéro du compteur d'échecs."""
         try:
-            conn = self._open_db_connection()
-            conn.execute(
-                "UPDATE auth_user SET last_login = ?, echecs = 0, verrouille_jusqua = NULL WHERE id = ?",
-                (datetime.now().isoformat(), user_id),
-            )
-            conn.commit()
-            conn.close()
+            with closing(self._open_db_connection()) as conn:
+                conn.execute(
+                    "UPDATE auth_user SET last_login = ?, echecs = 0, verrouille_jusqua = NULL WHERE id = ?",
+                    (datetime.now().isoformat(), user_id),
+                )
+                conn.commit()
         except Exception:
-            pass
+            logger.exception("Mise à jour de la dernière connexion échouée")
 
     def _enregistrer_echec(self, user_id: int):
         """Compte l'échec en base; verrouille le compte au-delà du maximum.
@@ -755,6 +757,12 @@ class LoginApp(QDialog):
 if __name__ == "__main__":
     print("🚀 Démarrage de l'application...")
     app = QApplication(sys.argv)
+
+    def _excepthook(exc_type, exc, tb):
+        """PyQt6 abort() sur toute exception non gérée dans un slot: on journalise et on prévient."""
+        logger.critical("Exception non gérée", exc_info=(exc_type, exc, tb))
+        QMessageBox.critical(None, "Erreur inattendue", f"{exc_type.__name__}: {exc}")
+    sys.excepthook = _excepthook
 
     resolved_db_path = AppConfig.get_db_path()
     print(f"[DB] Chemin utilisé: {resolved_db_path}")

@@ -89,6 +89,12 @@ def _hash_password(password: str) -> str:
     return _PM.hash_password(password)
 
 
+def retire_admin_autorise(uid) -> bool:
+    """False si `uid` est le dernier administrateur actif (le supprimer ou le rétrograder bloquerait l'appli)."""
+    admins = db.execute_query("SELECT id FROM auth_user WHERE role = 'admin' AND is_active = 1")
+    return not any(str(a["id"]) == str(uid) for a in admins) or len(admins) > 1
+
+
 # ── Dialogue utilisateur ──────────────────────────────────────────────────────
 
 class UserFormDialog(QDialog):
@@ -441,16 +447,23 @@ class _UsersTab(QWidget):
             return
 
         is_admin = 1 if new_role == "admin" else 0
-        if new_password:
-            db.execute_update(
-                "UPDATE auth_user SET username=?, email=?, role=?, is_superuser=?, is_staff=?, password=? WHERE id=?",
-                (new_username, new_email, new_role, is_admin, is_admin, _hash_password(new_password), uid),
-            )
-        else:
-            db.execute_update(
-                "UPDATE auth_user SET username=?, email=?, role=?, is_superuser=?, is_staff=? WHERE id=?",
-                (new_username, new_email, new_role, is_admin, is_admin, uid),
-            )
+        if not is_admin and not retire_admin_autorise(uid):
+            QMessageBox.warning(self, "Modification", "Impossible de rétrograder le dernier administrateur.")
+            return
+        try:
+            if new_password:
+                db.execute_update(
+                    "UPDATE auth_user SET username=?, email=?, role=?, is_superuser=?, is_staff=?, password=? WHERE id=?",
+                    (new_username, new_email, new_role, is_admin, is_admin, _hash_password(new_password), uid),
+                )
+            else:
+                db.execute_update(
+                    "UPDATE auth_user SET username=?, email=?, role=?, is_superuser=?, is_staff=? WHERE id=?",
+                    (new_username, new_email, new_role, is_admin, is_admin, uid),
+                )
+        except Exception as exc:  # ex.: identifiant déjà pris (UNIQUE)
+            QMessageBox.critical(self, "Utilisateur", f"Impossible de modifier :\n{exc}")
+            return
         self._refresh_table()
 
     def _on_delete(self) -> None:
@@ -465,6 +478,9 @@ class _UsersTab(QWidget):
             QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
+            return
+        if not retire_admin_autorise(uid):
+            QMessageBox.warning(self, "Suppression", "Impossible de supprimer le dernier administrateur.")
             return
         try:
             db.execute_update("DELETE FROM auth_user WHERE id = ?", (uid,))
@@ -489,7 +505,7 @@ class _UsersTab(QWidget):
             return
         try:
             db.execute_update(
-                "UPDATE auth_user SET password = ? WHERE id = ?",
+                "UPDATE auth_user SET password = ?, echecs = 0, verrouille_jusqua = NULL WHERE id = ?",
                 (_hash_password(new_password), uid),
             )
         except Exception as exc:

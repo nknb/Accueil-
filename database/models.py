@@ -40,13 +40,15 @@ class Statut(Enum):
     EN_COURS = 'en_cours'
     TRAITE = 'traite'
     ANNULE = 'annule'
+    NON_TRAITE = 'non_traite'  # posé par le rollover quotidien
     
     def __str__(self):
         labels = {
             'en_attente': '⏳ En attente',
             'en_cours': '🔄 En cours',
             'traite': '✅ Traité',
-            'annule': '❌ Annulé'
+            'annule': '❌ Annulé',
+            'non_traite': '⚠️ Non traité'
         }
         return labels.get(self.value, self.value)
     
@@ -56,7 +58,8 @@ class Statut(Enum):
             'en_attente': '#ffc107',
             'en_cours': '#17a2b8',
             'traite': '#28a745',
-            'annule': '#dc3545'
+            'annule': '#dc3545',
+            'non_traite': '#fd7e14'
         }
         return colors.get(self.value, '#6c757d')
 
