@@ -12,7 +12,7 @@ Python 3.11, PyQt6 + QtCharts, SQLite (stdlib), bcrypt, openpyxl (export Excel).
 - `database/models.py` — `DemandeAccueil`, `Service`, `Motif`, `Permission`, `Role`
 - `sidebar/` — fenêtre principale, navigation, filtrage des vues par rôle (`main_windows.py`)
 - `widgets/{accueil,preaccueil,database,dashboard,users}/` — une page par dossier
-- `ui/` — widgets partagés (formulaire de demande, statistiques, permissions)
+- `ui/dashboard_theme.py` — couleurs partagées du dashboard (le reste de `ui/` était du code mort, supprimé)
 - `utils/` — `PasswordManager` (bcrypt), validateurs, loggers
 - `sidebar/style.qss` — styles; `resources/` — icônes; `res.py`, `*/resource.py`, `*/resource_rc.py` — générés par Qt (ne pas éditer)
 - `seed_data.py` — jeu de données de démonstration (écrit dans `db.sqlite3` du dossier courant)
