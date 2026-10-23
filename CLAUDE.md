@@ -22,6 +22,7 @@ Python 3.11, PyQt6 + QtCharts, SQLite (stdlib), bcrypt, openpyxl (export Excel).
 - Installer: `pip install -r requirements-dev.txt`
 - Lancer: `python main.py`
 - Données de démo: `python seed_data.py`
+- Sauvegarde de la base: `python main.py --sauvegarde [--base CHEMIN] [--dossier D] [--garder N]` (copie vérifiée dans `sauvegardes/`); mesure réseau: `python tools/benchmark_reseau.py [DOSSIER]`
 - Tests: `python -m pytest`
 - Build PyInstaller: `pyinstaller AccueilCNPS.spec`
 - Build Nuitka: `bash build_nuitka.sh` (à lancer sous Windows: PyQt6 n'est pas supporté par Nuitka sous macOS)

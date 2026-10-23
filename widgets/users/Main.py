@@ -16,6 +16,7 @@ from utils.validators import InputValidator
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
+    QApplication,
     QWidget,
     QMainWindow,
     QVBoxLayout,
@@ -41,6 +42,7 @@ from PyQt6.QtWidgets import (
 )
 
 from database.connection import db
+from database.sauvegarde import DOSSIER_PAR_DEFAUT as DOSSIER_SAUVEGARDES, derniere_sauvegarde, sauvegarder_base
 
 _LOG = logging.getLogger(__name__)
 
@@ -933,6 +935,35 @@ class _ConfigTab(QWidget):
 
         body_lay.addWidget(status_grp)
 
+        # ── Carte : sauvegarde ────────────────────────────────────────────
+        sauv_grp = QGroupBox("Sauvegarde de la base")
+        sauv_grp.setStyleSheet(self._SS_CARD)
+        sv = QVBoxLayout(sauv_grp)
+        sv.setContentsMargins(14, 10, 14, 14)
+        sv.setSpacing(8)
+        self._lbl_sauvegarde = QLabel()
+        self._lbl_sauvegarde.setWordWrap(True)
+        self._lbl_sauvegarde.setStyleSheet("font-size:12px; color:#334155;")
+        sv.addWidget(self._lbl_sauvegarde)
+        aide = QLabel(
+            "Copie cohérente de la base (sans arrêter les autres postes), vérifiée, dans le dossier "
+            "« sauvegardes » à côté de la base; les 30 dernières sont conservées. Pour une sauvegarde "
+            "chaque nuit, planifiez : AccueilCNPS.exe --sauvegarde"
+        )
+        aide.setWordWrap(True)
+        aide.setStyleSheet("font-size:11px; color:#64748b;")
+        sv.addWidget(aide)
+        ligne_sauv = QHBoxLayout()
+        ligne_sauv.addStretch()
+        btn_sauv = QPushButton("💾  Sauvegarder maintenant")
+        btn_sauv.setStyleSheet(_BTN_PRIMARY)
+        btn_sauv.setFixedHeight(34)
+        btn_sauv.clicked.connect(self._sauvegarder_maintenant)
+        ligne_sauv.addWidget(btn_sauv)
+        sv.addLayout(ligne_sauv)
+        body_lay.addWidget(sauv_grp)
+        self._maj_etat_sauvegarde()
+
         # ── Carte : modifier la configuration ────────────────────────────
         cfg_grp = QGroupBox("Modifier la configuration")
         cfg_grp.setStyleSheet(self._SS_CARD)
@@ -1018,6 +1049,31 @@ class _ConfigTab(QWidget):
         root.addWidget(scroll, 1)
 
     # ── Logique ──────────────────────────────────────────────────────────────
+
+    def _dossier_sauvegardes(self) -> Path:
+        from config import AppConfig
+        return AppConfig.get_db_path().parent / DOSSIER_SAUVEGARDES
+
+    def _maj_etat_sauvegarde(self) -> None:
+        derniere = derniere_sauvegarde(self._dossier_sauvegardes())
+        self._lbl_sauvegarde.setText(
+            "Aucune sauvegarde pour le moment." if derniere is None
+            else f"Dernière sauvegarde : {derniere:%d/%m/%Y à %H:%M}"
+        )
+
+    def _sauvegarder_maintenant(self) -> None:
+        from config import AppConfig
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            fichier = sauvegarder_base(AppConfig.get_db_path())
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            _LOG.exception("Sauvegarde manuelle impossible")
+            QMessageBox.critical(self, "Sauvegarde", f"La sauvegarde a échoué :\n{exc}")
+            return
+        QApplication.restoreOverrideCursor()
+        self._maj_etat_sauvegarde()
+        QMessageBox.information(self, "Sauvegarde", f"Sauvegarde créée :\n{fichier}")
 
     def _load_config(self):
         from config import AppConfig

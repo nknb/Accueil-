@@ -826,6 +826,9 @@ class LoginApp(QDialog):
 
 # ===== PARTIE 4: PROGRAMME PRINCIPAL =====
 if __name__ == "__main__":
+    if "--sauvegarde" in sys.argv:   # tâche planifiée: sauvegarde sans interface, puis sortie
+        from database.sauvegarde import sauvegarde_cli
+        sys.exit(sauvegarde_cli(sys.argv[1:]))
     print("🚀 Démarrage de l'application...")
     app = QApplication(sys.argv)
 

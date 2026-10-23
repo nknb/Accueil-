@@ -254,8 +254,22 @@ class DatabaseConnection:
                     except Exception as idx_err:
                         logger.warning("Index ignoré (%s): %s", stmt, idx_err)
                 conn.commit()
+                self._optimiser(conn)
         except Exception as exc:
             logger.warning("Initialisation des index non appliquée: %s", exc)
+
+    def _optimiser(self, conn: sqlite3.Connection) -> None:
+        """Met à jour les statistiques du planificateur (sqlite_stat1) pour que les index soient bien choisis.
+
+        `optimize(0x10002)` n'analyse que les tables sans statistiques ou très modifiées; `analysis_limit`
+        borne le coût. Attente courte: si la base est occupée on réessaiera au démarrage d'un autre poste.
+        """
+        try:
+            conn.execute("PRAGMA busy_timeout = 2000")
+            conn.execute("PRAGMA analysis_limit = 1000")
+            conn.execute("PRAGMA optimize(0x10002)").fetchall()
+        except sqlite3.Error as exc:
+            logger.warning("PRAGMA optimize non appliqué: %s", exc)
 
     # ── Application des PRAGMAs ───────────────────────────────────────────────
 

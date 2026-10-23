@@ -41,6 +41,23 @@ Le chemin est résolu dans cet ordre :
 
 `db.sqlite3` contient des données personnelles : il n'est jamais commité ni embarqué dans un build. Le schéma est créé automatiquement au démarrage. `python seed_data.py` génère des données de démonstration ; il refuse de s'exécuter si la base contient déjà des demandes, sauf avec `--force`.
 
+## Sauvegarde
+
+La base est un fichier unique partagé: sans sauvegarde, une corruption ou une panne du partage fait tout perdre. La sauvegarde est une copie cohérente faite avec l'API de SQLite (les autres postes peuvent continuer à travailler), vérifiée par `PRAGMA integrity_check`, puis rangée dans le dossier `sauvegardes/` à côté de la base (`accueil-AAAAMMJJ-HHMMSS.sqlite3`). Les 30 dernières sont conservées.
+
+- **À la demande** : Utilisateurs > Configuration > « Sauvegarder maintenant » (affiche aussi la date de la dernière sauvegarde).
+- **Chaque nuit** (recommandé), sur un poste ou le serveur, en tâche planifiée Windows :
+
+  ```bat
+  schtasks /Create /SC DAILY /ST 22:00 /TN "CNPS Accueil sauvegarde" /TR "C:\CNPS\AccueilCNPS\AccueilCNPS.exe --sauvegarde"
+  ```
+
+  Options : `--base CHEMIN`, `--dossier DOSSIER`, `--garder N`. Code de sortie : 0 réussi, 1 échec, 2 arguments invalides ; le détail est dans `logs/app.log`.
+- **Restaurer** : fermer l'application sur tous les postes, copier la sauvegarde choisie à la place de `db.sqlite3`, relancer.
+- Vérifiez de temps en temps qu'une sauvegarde récente existe et copiez le dossier `sauvegardes/` hors du serveur.
+
+Au démarrage, `PRAGMA optimize` met à jour les statistiques de SQLite pour que les index soient bien choisis (aucune action à faire).
+
 ## Fonctionnement multi-postes
 
 Plusieurs postes lisent et écrivent le même fichier SQLite. Pour rester fluide :
