@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 import logging
+import math
 import os
 import platform
 import subprocess
@@ -65,6 +66,23 @@ def _texte_cellule(cell, val):
     if isinstance(val, str) and val.startswith("="):
         cell.data_type = "s"
     return cell
+
+
+def _graduation_entiere(max_val: int, marge: float = 1.25) -> tuple[int, int]:
+    """(sommet, pas) entiers pour un axe de comptage: évite les graduations fractionnaires arrondies par '%d'."""
+    cible = max(1, math.ceil(max_val * marge))
+    pas = max(1, math.ceil(cible / 5))
+    return pas * math.ceil(cible / pas), pas
+
+
+def _axe_entier(axe, max_val: int, marge: float = 1.25) -> None:
+    """Configure un QValueAxis de comptage avec des graduations entières uniques."""
+    haut, pas = _graduation_entiere(max_val, marge)
+    axe.setRange(0, haut)
+    axe.setLabelFormat("%d")
+    axe.setTickType(QValueAxis.TickType.TicksDynamic)
+    axe.setTickAnchor(0)
+    axe.setTickInterval(pas)
 
 
 def _minutes_attente(t) -> int | None:
@@ -2570,9 +2588,7 @@ class _ChartHandler:
         wait_bar_series.attachAxis(ax_x)
 
         ax_y = QValueAxis()
-        ax_y.setRange(0, max(_wc) * 1.25 if max(_wc) > 0 else 10)
-        ax_y.setLabelFormat("%d")
-        ax_y.setTickCount(5)
+        _axe_entier(ax_y, max(_wc))
         self._style_axis(ax_y)
         wait_chart.addAxis(ax_y, Qt.AlignmentFlag.AlignLeft)
         wait_bar_series.attachAxis(ax_y)
@@ -2615,9 +2631,7 @@ class _ChartHandler:
         _sat_series.attachAxis(_ax_cat)
 
         _ax_val = QValueAxis()
-        _ax_val.setRange(0, max(sat_counts) * 1.35 if max(sat_counts) > 0 else 10)
-        _ax_val.setLabelFormat("%d")
-        _ax_val.setTickCount(5)
+        _axe_entier(_ax_val, max(sat_counts), 1.35)
         self._style_axis(_ax_val)
         _sat_chart.addAxis(_ax_val, Qt.AlignmentFlag.AlignLeft)
         _sat_series.attachAxis(_ax_val)
@@ -2798,9 +2812,7 @@ class _ChartHandler:
 
         max_val = max(counts) if counts else 1
         ax_x = QValueAxis()
-        ax_x.setRange(0, max_val * 1.3)
-        ax_x.setLabelFormat("%d")
-        ax_x.setTickCount(5)
+        _axe_entier(ax_x, int(max_val), 1.3)
         self._style_axis(ax_x)
         chart.addAxis(ax_x, Qt.AlignmentFlag.AlignBottom)
         series.attachAxis(ax_x)

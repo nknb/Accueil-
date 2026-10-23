@@ -165,3 +165,13 @@ def test_formulaire_utilisateur_valide_identifiant_et_email(qtbot):
     assert d.get_data()[0] == "agent_01"
     d.email_edit.setText("agent@cnps.ci")
     assert d.get_data()[1] == "agent@cnps.ci"
+
+
+def test_graduation_entiere_pas_de_doublons():
+    from widgets.dashboard.Main import _graduation_entiere
+    for max_val in (0, 1, 3, 5, 7, 12, 480, 5200):
+        haut, pas = _graduation_entiere(max_val, 1.25)
+        assert isinstance(pas, int) and pas >= 1
+        assert haut % pas == 0 and haut >= max_val          # la barre la plus haute tient dans l'axe
+        assert haut // pas <= 6                              # au plus 7 graduations
+    assert _graduation_entiere(3, 1.25) == (4, 1)            # 0 1 2 3 4, plus de doublon
