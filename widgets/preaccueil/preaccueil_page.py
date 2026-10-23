@@ -893,7 +893,7 @@ class PreAccueilPage(QMainWindow):
     def load_services(self):
         """Load services from database."""
         try:
-            query = "SELECT id, nom FROM accueil_service ORDER BY nom"
+            query = "SELECT id, nom FROM accueil_service WHERE actif = 1 ORDER BY nom"
             results = db.execute_query(query)
             
             self.combo_service.clear()
@@ -914,7 +914,7 @@ class PreAccueilPage(QMainWindow):
     def load_motifs(self):
         """Load motifs from database."""
         try:
-            query = "SELECT id, nom FROM accueil_motif ORDER BY nom"
+            query = "SELECT id, nom FROM accueil_motif WHERE actif = 1 ORDER BY nom"
             results = db.execute_query(query)
             
             self.combo_motif.clear()

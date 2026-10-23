@@ -81,3 +81,15 @@ def test_export_excel_pas_de_formule_et_totaux_complets(tmp_path):
     mot = [[c.value for c in r] for r in wb["Motifs"].iter_rows(min_row=4)]
     assert ["Autres", 7, "58.3 %"] in mot        # 7/12
     assert mot[-1][1] == 12                      # TOTAL = total des demandes
+
+
+def test_preaccueil_ne_propose_pas_les_services_et_motifs_inactifs(qtbot):
+    from widgets.preaccueil import PreAccueilPage
+    db.execute_insert("INSERT INTO accueil_service (nom, actif) VALUES ('SvcInactif', 0)")
+    db.execute_insert("INSERT INTO accueil_motif (nom, actif) VALUES ('MotifInactif', 0)")
+    page = PreAccueilPage()
+    qtbot.addWidget(page)
+    services = [page.combo_service.itemText(i) for i in range(page.combo_service.count())]
+    motifs = [page.combo_motif.itemText(i) for i in range(page.combo_motif.count())]
+    assert "SvcInactif" not in services and "MotifInactif" not in motifs
+    assert len(services) > 1 and len(motifs) > 1  # les actifs restent proposés
