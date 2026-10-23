@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
-from collections import Counter
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Optional
 
@@ -40,6 +41,13 @@ from PyQt6.QtWidgets import (
 from config import AppConfig
 from database.connection import db
 from database.models import DemandeAccueil
+
+_LOG = logging.getLogger(__name__)
+
+# Délai avant d'interroger la base après une frappe (évite une requête par caractère)
+_DEBOUNCE_MS = 250
+# Threads de rechargement encore actifs à la fermeture (gardés en vie jusqu'à leur fin)
+_THREADS_ORPHELINS: list = []
 
 
 # ── Colonnes visibles ─────────────────────────────────────────────────────────
@@ -141,35 +149,142 @@ _PRIO_COLORS = {
 }
 
 
+# ── Requêtes SQL (filtre, tri et pagination côté base) ────────────────────────
+# Aucune valeur saisie n'entre dans le SQL: les noms de colonnes viennent de ces
+# dictionnaires fixes (liste blanche), les valeurs sont toujours des paramètres `?`.
+
+_SQL_FROM = (
+    "FROM accueil_demandeaccueil d"
+    " LEFT JOIN accueil_service s ON d.service_demande_id = s.id"
+    " LEFT JOIN accueil_motif   m ON d.motif_id = m.id"
+)
+_SQL_SELECT = {
+    "id": "d.id", "date": "d.date", "nom": "d.nom", "prenom": "d.prenom",
+    "numero_cnps": "d.numero_cnps", "service": "COALESCE(s.nom, '—')",
+    "motif": "COALESCE(m.nom, '—')", "priorite": "d.priorite", "statut": "d.statut",
+    "heure_arrivee": "d.heure_arrivee", "temps_attente": "d.temps_attente",
+    "satisfaction": "d.satisfaction", "contacts": "d.contacts",
+}
+_SQL_TEXT = dict(_SQL_SELECT, satisfaction="CAST(d.satisfaction AS TEXT)")  # pour LIKE
+_SQL_ORDER = dict(_SQL_SELECT, id="CAST(d.id AS INTEGER)")                  # tri numérique
+_SQL_NUMERIC = frozenset({"id", "satisfaction"})
+_SQL_EXACT = frozenset({"statut", "priorite", "service", "motif"})          # listes déroulantes
+_LIKE = " LIKE ? ESCAPE '\\'"
+
+
+def _like(valeur: str) -> str:
+    """Motif LIKE « contient », jokers % _ \\ de la saisie neutralisés."""
+    return "%" + valeur.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+@dataclass(frozen=True)
+class _Filtres:
+    """Instantané immuable des filtres, du tri et de la page demandés."""
+
+    date_from: str | None = None        # AAAA-MM-JJ inclus
+    date_to: str | None = None          # AAAA-MM-JJ EXCLU (lendemain du dernier jour)
+    search: str = ""
+    cols: tuple = ()                    # ((colonne, valeur), ...)
+    sort_col: str = "date"
+    sort_asc: bool = False
+    page: int = 1
+    per_page: int = 50
+
+
+def _where(f: _Filtres) -> tuple[str, list]:
+    """Clause WHERE paramétrée. Dates en intervalle ouvert à droite pour rester indexables."""
+    cond: list[str] = []
+    params: list = []
+    if f.date_from:
+        cond.append("d.date >= ?")
+        params.append(f.date_from)
+    if f.date_to:
+        cond.append("d.date < ?")
+        params.append(f.date_to)
+    if f.search:
+        champs = " || ' ' || ".join(f"COALESCE({_SQL_TEXT[k]}, '')" for k in _COL_KEYS)
+        cond.append(f"PYLOWER({champs}){_LIKE}")
+        params.append(_like(f.search))
+    for key, val in f.cols:
+        if key not in _SQL_TEXT or not val:
+            continue
+        if key in _SQL_EXACT:
+            cond.append(f"{_SQL_TEXT[key]} = ?")
+            params.append(val)
+        else:
+            cond.append(f"PYLOWER({_SQL_TEXT[key]}){_LIKE}")
+            params.append(_like(val))
+    return (" WHERE " + " AND ".join(cond)) if cond else "", params
+
+
+def _order(f: _Filtres) -> str:
+    """ORDER BY sur colonne de la liste blanche; d.rowid départage de façon stable (et reste indexable)."""
+    col = f.sort_col if f.sort_col in _SQL_ORDER else "date"
+    sens = "ASC" if f.sort_asc else "DESC"
+    nocase = "" if col in _SQL_NUMERIC else " COLLATE NOCASE"
+    return f" ORDER BY {_SQL_ORDER[col]}{nocase} {sens}, d.rowid {sens}"
+
+
+def lire_lignes(f: _Filtres, limit: int | None = None, offset: int = 0) -> list[dict]:
+    """Lignes filtrées/triées; `_maj` = updated_at lu (contrôle optimiste à la modification)."""
+    where, params = _where(f)
+    select = ", ".join(f"{expr} AS {k}" for k, expr in _SQL_SELECT.items())
+    return db.execute_query(
+        f"SELECT {select}, COALESCE(d.updated_at, '') AS _maj {_SQL_FROM}{where}{_order(f)} LIMIT ? OFFSET ?",
+        tuple(params) + (-1 if limit is None else limit, offset),
+    )
+
+
+def charger_page(f: _Filtres) -> dict:
+    """Une page de résultats + totaux (demandes, filtrées, traitées, en attente) + listes de filtres."""
+    where, params = _where(f)
+    filtered = db.execute_query(f"SELECT COUNT(*) AS n {_SQL_FROM}{where}", tuple(params))[0]["n"]
+    pages = max(1, -(-filtered // f.per_page))
+    page = max(1, min(f.page, pages))
+    rows = lire_lignes(f, f.per_page, (page - 1) * f.per_page)
+    tot = db.execute_query(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(statut = 'traite'), 0) AS t,"
+        " COALESCE(SUM(statut = 'en_attente'), 0) AS a FROM accueil_demandeaccueil"
+    )[0]
+    return {
+        "rows": rows, "filtered": filtered, "page": page, "pages": pages,
+        "total": tot["n"], "traite": tot["t"], "attente": tot["a"],
+        "services": [r["nom"] for r in db.execute_query(
+            "SELECT nom FROM accueil_service WHERE actif=1 ORDER BY nom")],
+        "motifs": [r["nom"] for r in db.execute_query(
+            "SELECT nom FROM accueil_motif WHERE actif=1 ORDER BY nom")],
+    }
+
+
 # ── Worker de rechargement ────────────────────────────────────────────────────
 
 class _ReloadWorker(QObject):
+    """Charge une page en tâche de fond; saute la lecture si `last_token` est toujours à jour."""
+
     finished = pyqtSignal(dict)
     failed   = pyqtSignal(str)
 
+    def __init__(self, filtres: _Filtres, last_token: tuple | None = None) -> None:
+        super().__init__()
+        self._filtres = filtres
+        self._last_token = last_token
+
     def run(self) -> None:
         try:
-            records = db.execute_query(
-                """SELECT
-                    d.id, d.date, d.nom, d.prenom, d.numero_cnps,
-                    COALESCE(s.nom, '—') AS service,
-                    COALESCE(m.nom, '—') AS motif,
-                    d.priorite, d.statut,
-                    d.heure_arrivee, d.temps_attente,
-                    d.satisfaction, d.contacts
-                FROM accueil_demandeaccueil d
-                LEFT JOIN accueil_service s ON d.service_demande_id = s.id
-                LEFT JOIN accueil_motif   m ON d.motif_id = m.id
-                ORDER BY COALESCE(d.updated_at, d.created_at, d.date) DESC, d.id DESC"""
-            )
-            services  = [r["nom"] for r in db.execute_query(
-                "SELECT nom FROM accueil_service WHERE actif=1 ORDER BY nom")]
-            motifs    = [r["nom"] for r in db.execute_query(
-                "SELECT nom FROM accueil_motif WHERE actif=1 ORDER BY nom")]
-            self.finished.emit({"records": records, "services": services, "motifs": motifs})
+            try:
+                token = db.change_token()  # lu AVANT les données: une écriture concurrente relancera un tour
+            except Exception:
+                _LOG.warning("change_token indisponible, rechargement complet", exc_info=True)
+                token = None
+            if token is not None and token == self._last_token:
+                self.finished.emit({"unchanged": True})
+                return
+            payload = charger_page(self._filtres)
+            payload["token"] = token
+            self.finished.emit(payload)
         except Exception as exc:
+            _LOG.exception("Rechargement de la page Base de données impossible")
             self.failed.emit(str(exc))
-
 
 _PRIORITES = ("normale", "moyenne", "haute")
 
@@ -303,8 +418,9 @@ class DatabasePage(QMainWindow):
         self._sort_col: str  = "date"
         self._sort_asc: bool = False
 
-        self.all_records:      list[dict] = []
-        self.filtered_records: list[dict] = []
+        self.page_records: list[dict] = []   # lignes de la page affichée (le reste reste en base)
+        self.total_count = 0
+        self.filtered_count = 0
         self.current_page  = 1
         self.items_per_page = 50
         self.total_pages    = 1
@@ -319,11 +435,14 @@ class DatabasePage(QMainWindow):
 
         self._refresh_in_progress = False
         self._refresh_pending     = False
-        self._last_sig: tuple | None = None
-        self._reload_thread: QThread | None = None
-        self._reload_worker: _ReloadWorker | None = None
-        self._cache: dict = {}
-        self._cache_ttl_sec = AppConfig.DATABASE_CACHE_TTL_SEC
+        self._pending_manual      = False
+        self._closing             = False
+        self._last_token: tuple | None = None   # db.change_token() de la dernière lecture
+        self._live: list[tuple[QThread, _ReloadWorker]] = []   # chargements en cours
+        self._filter_timer = QTimer(self)       # debounce de la recherche et des filtres texte
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(_DEBOUNCE_MS)
+        self._filter_timer.timeout.connect(lambda: self._apply_filters(reset_page=True))
 
         self._build_ui()
         self._load_data()
@@ -535,7 +654,7 @@ class DatabasePage(QMainWindow):
 
     def _on_search_changed(self, text: str) -> None:
         self._global_search = text.strip().lower()
-        self._apply_filters(reset_page=True)
+        self._filter_timer.start()
 
     def _on_period_clicked(self, key: str) -> None:
         # Décocher tous les boutons sauf le cliqué
@@ -645,7 +764,7 @@ class DatabasePage(QMainWindow):
                 w = QLineEdit(frame)
                 w.setStyleSheet(_FILTER_ROW_STYLE)
                 w.setPlaceholderText("▼")
-                w.textChanged.connect(lambda _: self._apply_filters(reset_page=True))
+                w.textChanged.connect(lambda _: self._filter_timer.start())
 
             w.setFixedHeight(26)
             self._filter_widgets[key] = w
@@ -745,101 +864,106 @@ class DatabasePage(QMainWindow):
 
     def _init_auto_refresh(self) -> None:
         self._auto_timer = QTimer(self)
-        self._auto_timer.timeout.connect(self._refresh_discreet)
+        self._auto_timer.timeout.connect(self._refresh_auto)
         self._auto_timer.start(AppConfig.AUTO_REFRESH_INTERVAL_MS)
 
-    # ── Chargement / cache ────────────────────────────────────────────────────
+    # ── Chargement (SQL: filtre, tri et pagination côté base) ─────────────────
 
     def _load_data(self) -> None:
-        self._refresh_discreet(force=True)
+        self._request_load(auto=False)
 
-    def _get_cached(self) -> Optional[dict]:
-        entry = self._cache.get("payload")
-        if not entry:
-            return None
-        if (datetime.now() - entry["ts"]).total_seconds() > self._cache_ttl_sec:
-            return None
-        return entry["data"]
+    def _refresh_auto(self) -> None:
+        """Rafraîchissement périodique: sans effet si rien n'a changé en base (change_token)."""
+        self._request_load(auto=True)
 
-    def _set_cached(self, data: dict) -> None:
-        self._cache["payload"] = {"ts": datetime.now(), "data": data}
+    def _filtres(self) -> _Filtres:
+        """Instantané des filtres, du tri et de la page affichés à l'écran."""
+        return _Filtres(
+            date_from=self._date_from.toString("yyyy-MM-dd") if self._date_from else None,
+            date_to=self._date_to.addDays(1).toString("yyyy-MM-dd") if self._date_to else None,
+            search=self._global_search,
+            cols=tuple((k, v) for k in _COL_KEYS if (v := self._get_filter_value(k))),
+            sort_col=self._sort_col, sort_asc=self._sort_asc,
+            page=self.current_page, per_page=self.items_per_page,
+        )
 
-    def _refresh_discreet(self, force: bool = False) -> None:
+    def _request_load(self, auto: bool = False) -> None:
+        """Lance un chargement. `auto=True`: saute si le jeton de changement est inchangé."""
+        if self._closing:
+            return
         if self._refresh_in_progress:
             self._refresh_pending = True
+            self._pending_manual = self._pending_manual or not auto
             return
         self._refresh_in_progress = True
-        self._spinner.setVisible(True)
-        self._set_state("• Synchronisation…", "#1e88e5")
+        if not auto:
+            self._spinner.setVisible(True)
+            self._set_state("• Synchronisation…", "#1e88e5")
+        self._start_worker(self._last_token if auto else None)
 
-        if not force:
-            cached = self._get_cached()
-            if cached is not None:
-                try:
-                    self._apply_payload(cached)
-                finally:
-                    self._finalize_refresh()
-                return
+    def _start_worker(self, last_token: tuple | None) -> None:
+        thread = QThread(self)
+        worker = _ReloadWorker(self._filtres(), last_token)
+        worker.moveToThread(thread)
+        self._live.append((thread, worker))  # références gardées jusqu'à la fin réelle du thread
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_finished)
+        worker.failed.connect(self._on_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(lambda: self._on_thread_done(thread))
+        thread.start()
 
-        self._start_worker()
-
-    def _start_worker(self) -> None:
-        self._reload_thread = QThread(self)
-        self._reload_worker = _ReloadWorker()
-        self._reload_worker.moveToThread(self._reload_thread)
-        self._reload_thread.started.connect(self._reload_worker.run)
-        self._reload_worker.finished.connect(self._on_finished)
-        self._reload_worker.failed.connect(self._on_failed)
-        self._reload_worker.finished.connect(self._reload_thread.quit)
-        self._reload_worker.failed.connect(self._reload_thread.quit)
-        self._reload_thread.finished.connect(self._on_thread_done)
-        self._reload_thread.start()
-
-    def _on_thread_done(self) -> None:
-        thread = self._reload_thread
-        self._reload_thread = None
-        self._reload_worker = None
-        if thread:
-            try:
-                thread.deleteLater()
-            except RuntimeError:
-                pass
+    def _on_thread_done(self, thread: QThread) -> None:
+        self._live = [(t, w) for t, w in self._live if t is not thread]
+        try:
+            thread.deleteLater()
+        except RuntimeError:
+            pass
 
     def _finalize_refresh(self) -> None:
         self._refresh_in_progress = False
         self._spinner.setVisible(False)
-        if self._refresh_pending:
+        if self._refresh_pending and not self._closing:
             self._refresh_pending = False
-            QTimer.singleShot(0, self._refresh_discreet)
+            manual, self._pending_manual = self._pending_manual, False
+            QTimer.singleShot(0, lambda: self._request_load(auto=not manual))
 
     def _on_finished(self, payload: dict) -> None:
+        if self._closing:
+            return
         try:
-            self._set_cached(payload)
-            self._apply_payload(payload)
+            if payload.get("unchanged"):
+                self._set_state("• À jour", "#22c55e")
+            else:
+                self._apply_payload(payload)
+        except Exception:
+            _LOG.exception("Rendu de la page Base de données impossible")
+            self._set_state("• Erreur d'affichage", "#c62828")
         finally:
             self._finalize_refresh()
 
     def _on_failed(self, msg: str) -> None:
+        if self._closing:
+            return
+        self._last_token = None  # forcer un vrai rechargement au prochain tour
         self._set_state("• Erreur sync", "#c62828")
         self._finalize_refresh()
 
     def _apply_payload(self, payload: dict) -> None:
-        records  = payload.get("records") or []
-        services = payload.get("services") or []
-        motifs   = payload.get("motifs") or []
-
-        sig = tuple((r.get("id"), r.get("statut")) for r in records)
-        if sig == self._last_sig:
-            self._set_state("• À jour", "#22c55e")
-            return
-        self._last_sig = sig
-        self.all_records = records
-
-        # Mettre à jour les ComboBox de filtre Service / Motif
-        self._refresh_filter_combos(services, motifs)
-
-        self._apply_filters(reset_page=True)
-        self._update_stats()
+        self._last_token = payload.get("token")
+        self.page_records = payload["rows"]
+        self.total_count = payload["total"]
+        self.filtered_count = payload["filtered"]
+        self.current_page = payload["page"]
+        self.total_pages = payload["pages"]
+        self._refresh_filter_combos(payload["services"], payload["motifs"])
+        self._render_page()
+        self._stat_total.setText(f"Total : {self.total_count:,}")
+        self._stat_traite.setText(f"Traitées : {payload['traite']:,}")
+        self._stat_attente.setText(f"En attente : {payload['attente']:,}")
+        n = self.filtered_count
+        self._stat_filtre.setText(f"▶ {n:,} résultats filtrés" if n < self.total_count else "")
         self._set_state("• À jour", "#22c55e")
 
     def _refresh_filter_combos(self, services: list[str], motifs: list[str]) -> None:
@@ -847,6 +971,8 @@ class DatabasePage(QMainWindow):
             (self._service_filter_cb, services, "_services"),
             (self._motif_filter_cb,   motifs,   "_motifs"),
         ]:
+            if items == getattr(self, attr):
+                continue
             cur = cb.currentData()
             cb.blockSignals(True)
             cb.clear()
@@ -872,79 +998,11 @@ class DatabasePage(QMainWindow):
         return ""
 
     def _apply_filters(self, reset_page: bool = True) -> None:
-        col_filters = {k: self._get_filter_value(k) for k in _COL_KEYS}
-        # Pré-cache : True = exact match (QComboBox), False = sous-chaîne (QLineEdit)
-        combo_keys = frozenset(
-            k for k in _COL_KEYS if isinstance(self._filter_widgets.get(k), QComboBox)
-        )
-
-        result = []
-        for rec in self.all_records:
-            # ── Filtre plage de dates ────────────────────────────────────
-            if self._date_from or self._date_to:
-                raw_date = str(rec.get("date") or "")[:10]  # "YYYY-MM-DD"
-                try:
-                    rec_date = QDate.fromString(raw_date, "yyyy-MM-dd")
-                    if not rec_date.isValid():
-                        continue
-                    if self._date_from and rec_date < self._date_from:
-                        continue
-                    if self._date_to and rec_date > self._date_to:
-                        continue
-                except Exception:
-                    continue
-
-            # ── Recherche globale (tous les champs) ──────────────────────
-            if self._global_search:
-                all_text = " ".join(str(v) for v in rec.values() if v is not None).lower()
-                if self._global_search not in all_text:
-                    continue
-
-            # ── Filtres colonnes ─────────────────────────────────────────
-            skip = False
-            for key, fval in col_filters.items():
-                if not fval:
-                    continue
-                cell = str(rec.get(key) or "").lower()
-                if key in combo_keys:
-                    if cell != fval:
-                        skip = True; break
-                else:
-                    if fval not in cell:
-                        skip = True; break
-            if skip:
-                continue
-            result.append(rec)
-
-        self.filtered_records = self._sort_records(result)
+        """Recharge la page courante avec les filtres/tri affichés (SQL)."""
+        self._filter_timer.stop()
         if reset_page:
             self.current_page = 1
-        n = len(self.filtered_records)
-        self.total_pages = max(1, (n + self.items_per_page - 1) // self.items_per_page)
-        self.current_page = max(1, min(self.current_page, self.total_pages))
-        self._render_page()
-        self._update_filter_stat(n)
-
-    def _sort_records(self, records: list[dict]) -> list[dict]:
-        col = self._sort_col
-
-        def _key(rec):
-            v = rec.get(col)
-            if v is None:
-                return (9, "")
-            text = str(v).strip()
-            for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-                try:
-                    return (0, datetime.strptime(text[:len(fmt)], fmt))
-                except ValueError:
-                    pass
-            try:
-                return (1, float(text))
-            except (ValueError, TypeError):
-                pass
-            return (2, text.lower())
-
-        return sorted(records, key=_key, reverse=not self._sort_asc)
+        self._request_load(auto=False)
 
     def _on_header_clicked(self, col_idx: int) -> None:
         key = _COL_KEYS[col_idx]
@@ -957,7 +1015,6 @@ class DatabasePage(QMainWindow):
         self._apply_filters(reset_page=False)
 
     def _update_header_arrows(self) -> None:
-        hh = self.table.horizontalHeader()
         for i, (key, label) in enumerate(zip(_COL_KEYS, _COL_LABELS)):
             if key == self._sort_col:
                 arrow = " ▲" if self._sort_asc else " ▼"
@@ -968,9 +1025,7 @@ class DatabasePage(QMainWindow):
     # ── Rendu tableau ─────────────────────────────────────────────────────────
 
     def _render_page(self) -> None:
-        start = (self.current_page - 1) * self.items_per_page
-        page  = self.filtered_records[start: start + self.items_per_page]
-        self._display_records(page)
+        self._display_records(self.page_records)
         self._pag_label.setText(f"Page {self.current_page} / {self.total_pages}")
         QTimer.singleShot(0, self._sync_filter_bar)
 
@@ -1016,69 +1071,41 @@ class DatabasePage(QMainWindow):
 
         self.table.setUpdatesEnabled(True)
 
-    # ── Stats ─────────────────────────────────────────────────────────────────
-
-    def _update_stats(self) -> None:
-        total  = len(self.all_records)
-        counts = Counter(str(r.get("statut") or "").lower() for r in self.all_records)
-        self._stat_total.setText(f"Total : {total:,}")
-        self._stat_traite.setText(f"Traitées : {counts['traite']:,}")
-        self._stat_attente.setText(f"En attente : {counts['en_attente']:,}")
-
-    def _update_filter_stat(self, n: int) -> None:
-        total = len(self.all_records)
-        if n < total:
-            self._stat_filtre.setText(f"▶ {n:,} résultats filtrés")
-        else:
-            self._stat_filtre.setText("")
-
-    # ── Filtres toolbar ───────────────────────────────────────────────────────
-
-    def _on_reset_all(self) -> None:
-        for w in self._filter_widgets.values():
-            if isinstance(w, QLineEdit):
-                w.clear()
-            elif isinstance(w, QComboBox):
-                w.setCurrentIndex(0)
-        self._apply_filters(reset_page=True)
-
     # ── Pagination ────────────────────────────────────────────────────────────
 
     _MAX_DISPLAY_ALL = 500  # Seuil de sécurité pour l'option "Tous"
 
     def _on_items_changed(self, value: str) -> None:
-        if value == "Tous":
-            self.items_per_page = min(len(self.all_records), self._MAX_DISPLAY_ALL)
-        else:
-            self.items_per_page = int(value)
-        self.current_page = 1
+        self.items_per_page = self._MAX_DISPLAY_ALL if value == "Tous" else int(value)
         self._apply_filters(reset_page=True)
 
+    def _goto(self, page: int) -> None:
+        page = max(1, min(page, self.total_pages))
+        if page != self.current_page:
+            self.current_page = page
+            self._request_load(auto=False)
+
     def _goto_first(self) -> None:
-        if self.current_page != 1:
-            self.current_page = 1; self._render_page()
+        self._goto(1)
 
     def _goto_prev(self) -> None:
-        if self.current_page > 1:
-            self.current_page -= 1; self._render_page()
+        self._goto(self.current_page - 1)
 
     def _goto_next(self) -> None:
-        if self.current_page < self.total_pages:
-            self.current_page += 1; self._render_page()
+        self._goto(self.current_page + 1)
 
     def _goto_last(self) -> None:
-        if self.current_page != self.total_pages:
-            self.current_page = self.total_pages; self._render_page()
+        self._goto(self.total_pages)
+
 
     # ── Export CSV ────────────────────────────────────────────────────────────
 
     def _on_export_excel(self) -> None:
         """Export des données filtrées vers un fichier Excel (.xlsx) avec mise en forme."""
-        if not self.filtered_records:
+        if not self.filtered_count:
             QMessageBox.information(self, "Export Excel", "Aucune donnée à exporter.")
             return
 
-        nb = len(self.filtered_records)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         default_name = f"demandes_accueil_{ts}.xlsx"
         path, _ = QFileDialog.getSaveFileName(
@@ -1090,6 +1117,9 @@ class DatabasePage(QMainWindow):
             return
 
         try:
+            # Toutes les lignes filtrées (pas seulement la page affichée), relues à l'instant de l'export
+            rows = lire_lignes(self._filtres())
+            nb = len(rows)
             wb = openpyxl.Workbook()
             ws = wb.active
             ws.title = "Demandes Accueil"
@@ -1134,7 +1164,7 @@ class DatabasePage(QMainWindow):
             ws.row_dimensions[1].height = 20
 
             # ── Données ───────────────────────────────────────────────────────
-            for row_idx, rec in enumerate(self.filtered_records, start=2):
+            for row_idx, rec in enumerate(rows, start=2):
                 statut = str(rec.get("statut") or "").strip().lower()
                 prio   = str(rec.get("priorite") or "").strip().lower()
                 row_fill = _STATUS_FILL.get(statut)
@@ -1177,24 +1207,21 @@ class DatabasePage(QMainWindow):
                 f"✅ {nb:,} lignes exportées\n{path}",
             )
         except Exception as exc:
+            _LOG.exception("Export Excel impossible")
             QMessageBox.critical(self, "Export Excel", f"Erreur lors de l'export :\n{exc}")
 
     # ── CRUD ──────────────────────────────────────────────────────────────────
 
     def _selected_record(self) -> Optional[dict]:
         row = self.table.currentRow()
-        if row < 0:
-            return None
-        start = (self.current_page - 1) * self.items_per_page
-        idx   = start + row
-        if 0 <= idx < len(self.filtered_records):
-            return self.filtered_records[idx]
+        if 0 <= row < len(self.page_records):
+            return self.page_records[row]
         return None
 
     def _invalidate_and_reload(self) -> None:
-        self._cache.clear()
-        self._last_sig = None
-        self._refresh_discreet(force=True)
+        """Après une action manuelle: oublie le jeton pour relire la base quoi qu'il arrive."""
+        self._last_token = None
+        self._request_load(auto=False)
 
     def _on_create(self) -> None:
         dlg = _RecordDialog(mode="create", parent=self)
@@ -1208,36 +1235,50 @@ class DatabasePage(QMainWindow):
             ok = DemandeAccueil(**p, satisfaction=int(sat) if sat else None).save()
             if not ok:
                 raise RuntimeError("enregistrement refusé, voir le journal")
-            self._invalidate_and_reload()
         except Exception as exc:
-            QMessageBox.critical(self, "CRUD", f"Échec création : {exc}")
+            _LOG.exception("Création de demande impossible")
+            QMessageBox.critical(self, "Création", f"Échec de la création : {exc}")
+            return
+        self._invalidate_and_reload()
 
     def _on_update(self) -> None:
         rec = self._selected_record()
         if not rec:
-            QMessageBox.information(self, "CRUD", "Sélectionnez une ligne à modifier.")
+            QMessageBox.information(self, "Modification", "Sélectionnez une ligne à modifier.")
             return
+        maj_lue = rec.get("_maj") or ""  # updated_at au moment d'ouvrir le dialogue
         dlg = _RecordDialog(initial=rec, mode="update", parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         p = dlg.payload()
         p["updated_at"] = datetime.now().isoformat()
-        parts = [f"{k} = ?" for k in p if k != "id"]
-        vals  = [p[k] for k in p if k != "id"]
-        vals.append(rec.get("id"))
+        parts = [f"{k} = ?" for k in p]  # clés issues de payload(): fixes, jamais saisies
+        vals  = list(p.values()) + [rec.get("id"), maj_lue]
         try:
-            db.execute_update(
-                f"UPDATE {self.TABLE} SET {', '.join(parts)} WHERE id = ?",
+            # Contrôle optimiste: ne modifie que si personne n'a touché la ligne depuis la lecture
+            n = db.execute_update(
+                f"UPDATE {self.TABLE} SET {', '.join(parts)}"
+                " WHERE id = ? AND COALESCE(updated_at, '') = ?",
                 tuple(vals),
             )
-            self._invalidate_and_reload()
+            existe = bool(n) or bool(db.execute_query(
+                f"SELECT 1 FROM {self.TABLE} WHERE id = ?", (rec.get("id"),)))
         except Exception as exc:
-            QMessageBox.critical(self, "CRUD", f"Échec modification : {exc}")
+            _LOG.exception("Modification de demande impossible")
+            QMessageBox.critical(self, "Modification", f"Échec de la modification : {exc}")
+            return
+        if not n:
+            QMessageBox.warning(
+                self, "Modification non enregistrée",
+                "Cette demande a été modifiée depuis un autre poste." if existe
+                else "Cette demande a été supprimée depuis un autre poste.",
+            )
+        self._invalidate_and_reload()
 
     def _on_delete(self) -> None:
         rec = self._selected_record()
         if not rec:
-            QMessageBox.information(self, "CRUD", "Sélectionnez une ligne à supprimer.")
+            QMessageBox.information(self, "Suppression", "Sélectionnez une ligne à supprimer.")
             return
         rid = rec.get("id")
         if QMessageBox.question(
@@ -1247,10 +1288,14 @@ class DatabasePage(QMainWindow):
         ) != QMessageBox.StandardButton.Yes:
             return
         try:
-            db.execute_update(f"DELETE FROM {self.TABLE} WHERE id = ?", (rid,))
-            self._invalidate_and_reload()
+            n = db.execute_update(f"DELETE FROM {self.TABLE} WHERE id = ?", (rid,))
         except Exception as exc:
-            QMessageBox.critical(self, "CRUD", f"Échec suppression : {exc}")
+            _LOG.exception("Suppression de demande impossible")
+            QMessageBox.critical(self, "Suppression", f"Échec de la suppression : {exc}")
+            return
+        if not n:
+            QMessageBox.information(self, "Suppression", "Cette demande avait déjà été supprimée depuis un autre poste.")
+        self._invalidate_and_reload()
 
     # ── État visuel ───────────────────────────────────────────────────────────
 
@@ -1261,16 +1306,19 @@ class DatabasePage(QMainWindow):
     # ── Fermeture propre ──────────────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
-        for attr in ("_auto_timer",):
-            t = getattr(self, attr, None)
-            if t and t.isActive():
+        self._closing = True
+        for t in (getattr(self, "_auto_timer", None), self._filter_timer):
+            if t is not None:
                 t.stop()
-        thread = self._reload_thread
-        if thread:
+        for thread, _ in list(self._live):
             try:
-                if thread.isRunning():
-                    thread.quit()
-                    thread.wait(1500)
+                thread.quit()
+                if not thread.wait(1500):
+                    # Lecture réseau lente: on détache le thread pour ne pas le détruire en marche
+                    thread.setParent(None)
+                    _THREADS_ORPHELINS.append(thread)
+                    thread.finished.connect(lambda t=thread: _THREADS_ORPHELINS.remove(t)
+                                            if t in _THREADS_ORPHELINS else None)
             except RuntimeError:
                 pass
         super().closeEvent(event)

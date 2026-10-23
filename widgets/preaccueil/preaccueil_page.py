@@ -1,5 +1,6 @@
 """Wrapper for PreAccueil widget using Show_Data UI structure."""
 
+import re
 from datetime import datetime
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QBrush
 from PyQt6.QtWidgets import (
@@ -28,6 +29,7 @@ from .Show_Data import Ui_MainWindow
 from database.connection import db
 from database.models import DemandeAccueil
 from utils import app_logger
+from widgets.accueil.accueil_page import plage_jour
 
 
 # ── Rôle custom pour le délégué ───────────────────────────────────────────────
@@ -153,6 +155,35 @@ class _PreAccueilRowDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+_CNPS_RE = re.compile(r"[A-Za-z0-9-]{1,30}")
+
+
+def valider_champs(nom: str, prenom: str, cnps, contact) -> "str | None":
+    """Valide le format des champs; renvoie un message d'erreur en français ou None."""
+    if len(nom) > 100:
+        return "Le nom ne doit pas dépasser 100 caractères"
+    if len(prenom) > 100:
+        return "Le prénom ne doit pas dépasser 100 caractères"
+    if cnps and not _CNPS_RE.fullmatch(cnps):
+        return "Le n° CNPS doit contenir au plus 30 caractères (lettres, chiffres ou tirets)"
+    if contact and len(contact) > 100:
+        return "Le contact ne doit pas dépasser 100 caractères"
+    return None
+
+
+def demande_en_double(cnps, service_id, motif_id, jour_iso: str) -> bool:
+    """Vrai si une demande en attente du jour a le même n° CNPS (non vide), service et motif."""
+    if not cnps:
+        return False
+    debut, fin = plage_jour(jour_iso)
+    rows = db.execute_query(
+        "SELECT 1 FROM accueil_demandeaccueil WHERE numero_cnps = ? AND service_demande_id = ?"
+        " AND motif_id = ? AND statut = 'en_attente' AND date >= ? AND date < ? LIMIT 1",
+        (cnps, service_id, motif_id, debut, fin),
+    )
+    return bool(rows)
+
+
 class PreAccueilPage(QMainWindow):
     """PreAccueil page using the Show_Data UI structure with custom logic."""
 
@@ -164,6 +195,8 @@ class PreAccueilPage(QMainWindow):
         self._refresh_context = {"silent": False}
         self._reload_thread = None
         self._reload_worker = None
+        self._last_token = None
+        self._last_token_day = None
         self._cache_ttl_sec = AppConfig.PREACCUEIL_CACHE_TTL_SEC
         self._demandes_cache = {}
         self._last_table_signature = None
@@ -334,13 +367,17 @@ class PreAccueilPage(QMainWindow):
                 ),
             )
 
-    def _start_reload_worker(self, today_str):
+    def _start_reload_worker(self, today_str, silent=False):
         self._reload_thread = QThread(self)
-        self._reload_worker = PreAccueilDemandesWorker(today_str)
+        # Auto-refresh: on ne relit la liste que si le jeton a changé (même jour)
+        prev = self._last_token if (silent and self._last_token_day == today_str) else None
+        self._reload_worker = PreAccueilDemandesWorker(today_str, previous_token=prev)
         self._reload_worker.moveToThread(self._reload_thread)
         self._reload_thread.started.connect(self._reload_worker.run)
         self._reload_worker.finished.connect(self._on_reload_finished)
         self._reload_worker.failed.connect(self._on_reload_failed)
+        self._reload_worker.unchanged.connect(self._on_reload_unchanged)
+        self._reload_worker.unchanged.connect(self._reload_thread.quit)
         self._reload_worker.finished.connect(self._reload_thread.quit)
         self._reload_worker.failed.connect(self._reload_thread.quit)
         self._reload_thread.finished.connect(self._reload_worker.deleteLater)
@@ -513,9 +550,18 @@ class PreAccueilPage(QMainWindow):
         finally:
             table.setUpdatesEnabled(True)
 
+    def _on_reload_unchanged(self):
+        """Rien de nouveau en base: on garde l'affichage actuel."""
+        try:
+            self._set_refresh_state("• À jour", "#0a8f2e")
+        finally:
+            self._finalize_refresh()
+
     def _on_reload_finished(self, results):
         try:
             today_str = datetime.now().date().isoformat()
+            self._last_token = getattr(getattr(self, "_reload_worker", None), "token", None)
+            self._last_token_day = today_str
             self._set_cached_results(today_str, results)
             self._apply_demandes_results(results, silent=self._refresh_context.get("silent", False))
         finally:
@@ -965,12 +1011,30 @@ class PreAccueilPage(QMainWindow):
             QMessageBox.warning(self, "Erreur Validation", "Veuillez sélectionner un motif")
             self.combo_motif.setFocus()
             return
-        
+
+        cnps = self.input_cnps.text().strip() or None
+        contact = self.input_contact.text().strip() or None
+        erreur = valider_champs(nom, prenom, cnps, contact)
+        if erreur:
+            QMessageBox.warning(self, "Erreur Validation", erreur)
+            return
+
+        if not self.btn_enregistrer.isEnabled():  # enregistrement déjà en cours
+            return
+        self.btn_enregistrer.setEnabled(False)
         try:
             service_id = self.combo_service.itemData(service_idx)
             motif_id = self.combo_motif.itemData(motif_idx)
-            cnps = self.input_cnps.text().strip() or None
-            contact = self.input_contact.text().strip() or None
+            if demande_en_double(cnps, service_id, motif_id, datetime.now().date().isoformat()):
+                reponse = QMessageBox.question(
+                    self, "Demande déjà enregistrée",
+                    "Une demande en attente existe déjà aujourd'hui pour ce n° CNPS, ce service et ce motif.\n\n"
+                    "Voulez-vous l'enregistrer quand même ?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if reponse != QMessageBox.StandardButton.Yes:
+                    return
 
             # Heure capturée au moment précis du clic — une seule fois
             heure_arrivee = datetime.now()
@@ -1009,6 +1073,8 @@ class PreAccueilPage(QMainWindow):
         except Exception as e:
             app_logger.error(f"Erreur lors de l'enregistrement: {e}")
             QMessageBox.critical(self, "Erreur", f"❌ Erreur: {str(e)}")
+        finally:
+            self.btn_enregistrer.setEnabled(True)
 
     def effacer_formulaire(self):
         """Clear the form."""
@@ -1049,7 +1115,7 @@ class PreAccueilPage(QMainWindow):
                 self._finalize_refresh()
                 return
 
-            self._start_reload_worker(today_str)
+            self._start_reload_worker(today_str, silent=silent)
         except Exception as e:
             app_logger.error(f"Erreur lors du chargement des demandes: {e}")
             self._set_refresh_state("• Erreur sync", "#c62828")
@@ -1078,11 +1144,24 @@ class PreAccueilDemandesWorker(QObject):
     finished = pyqtSignal(list)
     failed = pyqtSignal(str)
 
-    def __init__(self, today_str):
+    unchanged = pyqtSignal()
+
+    def __init__(self, today_str, previous_token=None):
         super().__init__()
         self.today_str = today_str
+        self.previous_token = previous_token
+        self.token = None
 
     def run(self):
+        try:
+            self.token = db.change_token()
+        except Exception as exc:  # repli: rechargement complet
+            app_logger.warning(f"Lecture du jeton de changement impossible (pré-accueil): {exc}")
+            self.token = None
+        if self.token is not None and self.token == self.previous_token:
+            self.unchanged.emit()
+            return
+        debut, fin = plage_jour(self.today_str)
         query = """
         SELECT
             d.nom, d.prenom, d.numero_cnps, s.nom as service, m.nom as motif,
@@ -1090,11 +1169,11 @@ class PreAccueilDemandesWorker(QObject):
         FROM accueil_demandeaccueil d
         LEFT JOIN accueil_service s ON d.service_demande_id = s.id
         LEFT JOIN accueil_motif m ON d.motif_id = m.id
-        WHERE DATE(d.date) = ?
+        WHERE d.date >= ? AND d.date < ?
         ORDER BY d.created_at DESC
         """
         try:
-            results = db.execute_query(query, (self.today_str,))
+            results = db.execute_query(query, (debut, fin))
             self.finished.emit(results)
         except Exception as exc:
             self.failed.emit(str(exc))

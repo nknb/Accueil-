@@ -40,7 +40,12 @@ import os
 import platform
 import subprocess
 
+from datetime import date, timedelta
+
+from config import AppConfig
 from database.connection import db
+
+logger = logging.getLogger(__name__)
 
 _DASHBOARD_ICONS_DIR = os.path.dirname(__file__)
 _CAL_ICON_DASHBOARD = os.path.join(_DASHBOARD_ICONS_DIR, "icons", "calendar.svg").replace("\\", "/")
@@ -103,170 +108,166 @@ def _heure_arrivee(value) -> int | None:
 
 # ── Worker QThread ─────────────────────────────────────────────────────────────
 
+_WAIT_ORDER = ['≤ 15 min', '15–30 min', '30–60 min', '60–90 min', '> 90 min']
+_DOW_FR = {"1": "Lun", "2": "Mar", "3": "Mer", "4": "Jeu", "5": "Ven"}  # strftime('%w'), Lun→Ven
+
+# Filtre de période indexable: d.date est comparé tel quel (chaînes ISO, fin exclue = fin + 1 jour);
+# created_at ne sert que si d.date est NULL.
+_PERIODE_SIMPLE = "AND {d} >= ? AND {d} < ?"
+_PERIODE_AVEC_NULL = (
+    "AND (({d} >= ? AND {d} < ?)"
+    " OR ({d} IS NULL AND {c} >= ? AND {c} < ?))"
+)
+# shortcut: au-delà de ce nombre de jours on neutralise l'index (préfixe '+'): lire la plage large
+# via l'index coûte plus cher (accès aléatoires) qu'un seul balayage; à affiner avec ANALYZE.
+_SEUIL_INDEX_JOURS = 90
+
+# Une seule passe sur la période: statuts, attentes (par tranche + moyenne), satisfaction.
+_SQL_GLOBAL = f"""
+    SELECT COUNT(*) AS total,
+           SUM(st = 'traite') AS traite,
+           SUM(st = 'en_attente') AS attente,
+           SUM(w <= 15) AS w1,
+           SUM(w > 15 AND w <= 30) AS w2,
+           SUM(w > 30 AND w <= 60) AS w3,
+           SUM(w > 60 AND w <= 90) AS w4,
+           SUM(w > 90) AS w5,
+           AVG(w) AS avg_w,
+           SUM(sat = 1) AS s1, SUM(sat = 2) AS s2, SUM(sat = 3) AS s3,
+           SUM(sat = 4) AS s4, SUM(sat = 5) AS s5,
+           AVG(CAST(sat AS REAL)) AS avg_sat
+    FROM (
+        SELECT lower(trim(COALESCE(d.statut, ''))) AS st,
+               CASE WHEN d.temps_attente IS NOT NULL AND d.temps_attente != ''
+                    THEN {_WAIT_MIN} END AS w,
+               d.satisfaction AS sat
+        FROM accueil_demandeaccueil d
+        WHERE 1=1 {{periode}}
+        LIMIT -1  -- empêche l'aplatissement: `w` n'est calculé qu'une fois par ligne
+    )
+"""
+
+
+def _filtre_periode(date_from: str, date_to: str) -> tuple[str, tuple]:
+    """(clause SQL, paramètres) de la période [date_from, date_to] sur l'alias `d`.
+
+    Période courte: comparaison directe de d.date (index idx_demande_date). Période large:
+    index neutralisé (balayage unique). La variante avec repli sur created_at (OR) n'est utilisée
+    que s'il existe des demandes sans date (rare: données importées).
+    """
+    fin = _jour_suivant(date_to)
+    jours = (date.fromisoformat(fin) - date.fromisoformat(date_from)).days
+    pre = "+" if jours > _SEUIL_INDEX_JOURS else ""
+    cols = {"d": f"{pre}d.date", "c": f"{pre}d.created_at"}
+    if db.execute_query("SELECT 1 FROM accueil_demandeaccueil WHERE date IS NULL LIMIT 1"):
+        return _PERIODE_AVEC_NULL.format(**cols), (date_from, fin, date_from, fin)
+    return _PERIODE_SIMPLE.format(**cols), (date_from, fin)
+
+
+def _jour_suivant(iso: str) -> str:
+    """'AAAA-MM-JJ' + 1 jour (borne de fin exclue); ValueError si la date est invalide."""
+    return (date.fromisoformat(iso) + timedelta(days=1)).isoformat()
+
+
+# ── Worker QThread ─────────────────────────────────────────────────────────────
+
 class _DashboardWorker(QObject):
     """Charge toutes les données du dashboard dans un thread séparé.
 
     Signaux :
         finished(dict) — données prêtes (jamais depuis l'UI thread)
+        unchanged()    — refresh conditionnel: rien n'a changé depuis `skip_if_token`
         failed(str)    — message d'erreur si la requête échoue
+
+    `token` garde l'empreinte lue AVANT les requêtes (une écriture pendant le
+    chargement provoquera donc un rechargement au tour suivant).
     """
 
-    finished = pyqtSignal(dict)
-    failed   = pyqtSignal(str)
+    finished  = pyqtSignal(dict)
+    unchanged = pyqtSignal()
+    failed    = pyqtSignal(str)
 
-    def __init__(self, date_from: str, date_to: str) -> None:
+    def __init__(self, date_from: str, date_to: str, skip_if_token: tuple | None = None) -> None:
         super().__init__()
         self._date_from = date_from
         self._date_to   = date_to
+        self._skip_if_token = skip_if_token
+        self.token: tuple | None = None
 
     def run(self) -> None:
-        """Exécute toutes les requêtes SQL hors thread UI."""
+        """Exécute les requêtes SQL hors thread UI."""
         try:
-            and_cond = "AND date(COALESCE(d.date, d.created_at)) BETWEEN ? AND ?"
-            params   = (self._date_from, self._date_to)
+            try:
+                self.token = db.change_token()
+            except Exception:
+                logger.warning("change_token indisponible: rechargement complet", exc_info=True)
+                self.token = None
+            if self.token is not None and self.token == self._skip_if_token:
+                self.unchanged.emit()
+                return
+            self.finished.emit(self.load())
+        except Exception as exc:
+            logger.exception("Échec du chargement du dashboard")
+            self.failed.emit(str(exc))
 
-            total_demandes = 0
-            total_traite   = 0
-            total_attente  = 0
-            total_non_traite = 0
-            services_names: list[str] = []
-            services_counts: list[int] = []
-            motifs_names: list[str] = []
-            motifs_counts: list[int] = []
-            wait_labels: list[str] = []
-            wait_counts: list[int] = []
-            avg_wait_min: float = 0.0
-            sat_counts: list[int] = [0, 0, 0, 0, 0]   # notes 1→5
-            sat_avg: float = 0.0
-            sat_total: int = 0
-            top_users: list[dict] = []
-            dow_labels: list[str] = []
-            dow_avgs:   list[float] = []
+    def load(self) -> dict:
+        """Lit les données de la période (5 requêtes) et renvoie le dictionnaire du dashboard."""
+        and_cond, params = _filtre_periode(self._date_from, self._date_to)
 
-            # Statuts
-            for row in db.execute_query(
-                f"SELECT statut, COUNT(*) AS nb FROM accueil_demandeaccueil d WHERE 1=1 {and_cond} GROUP BY statut",
-                params,
-            ):
-                st = str(row.get("statut") or "").strip().lower()
-                nb = int(row.get("nb") or 0)
-                total_demandes += nb
-                if st == "traite":
-                    total_traite += nb
-                elif st == "en_attente":
-                    total_attente += nb
-                else:
-                    total_non_traite += nb
+        g = db.execute_query(_SQL_GLOBAL.replace("{periode}", and_cond), params)[0]
 
-            # Par service
-            for row in db.execute_query(
-                f"""SELECT COALESCE(s.nom, 'Non renseigné') AS service, COUNT(*) AS nb
-                    FROM accueil_demandeaccueil d
-                    LEFT JOIN accueil_service s ON d.service_demande_id = s.id
-                    WHERE 1=1 {and_cond}
-                    GROUP BY COALESCE(s.nom, 'Non renseigné') ORDER BY nb DESC LIMIT 8""",
-                params,
-            ):
-                services_names.append(str(row.get("service") or ""))
-                services_counts.append(int(row.get("nb") or 0))
+        def n(key: str) -> int:
+            return int(g.get(key) or 0)
 
-            # Par motif
-            for row in db.execute_query(
-                f"""SELECT COALESCE(m.nom, 'Non renseigné') AS motif, COUNT(*) AS nb
-                    FROM accueil_demandeaccueil d
-                    LEFT JOIN accueil_motif m ON d.motif_id = m.id
-                    WHERE 1=1 {and_cond}
-                    GROUP BY COALESCE(m.nom, 'Non renseigné') ORDER BY nb DESC LIMIT 8""",
-                params,
-            ):
-                motifs_names.append(str(row.get("motif") or ""))
-                motifs_counts.append(int(row.get("nb") or 0))
+        total_demandes = n("total")
+        total_traite = n("traite")
+        total_attente = n("attente")
+        wait_counts = [n(f"w{i}") for i in range(1, 6)]
+        sat_counts = [n(f"s{i}") for i in range(1, 6)]
 
-            # Distribution temps d'attente par tranche
-            _wait_sql = f"""
-                SELECT
-                  CASE
-                    WHEN ({_WAIT_MIN}) <= 15 THEN '≤ 15 min'
-                    WHEN ({_WAIT_MIN}) <= 30 THEN '15–30 min'
-                    WHEN ({_WAIT_MIN}) <= 60 THEN '30–60 min'
-                    WHEN ({_WAIT_MIN}) <= 90 THEN '60–90 min'
-                    ELSE '> 90 min'
-                  END AS tranche,
-                  COUNT(*) AS nb
+        services = db.execute_query(
+            f"""SELECT COALESCE(s.nom, 'Non renseigné') AS service, COUNT(*) AS nb
                 FROM accueil_demandeaccueil d
-                WHERE temps_attente IS NOT NULL AND temps_attente != '' {and_cond}
-                GROUP BY tranche
-                ORDER BY MIN(
-                    {_WAIT_MIN}
-                )
-            """
-            _order = ['≤ 15 min', '15–30 min', '30–60 min', '60–90 min', '> 90 min']
-            _raw_wait: dict[str, int] = {}
-            for row in db.execute_query(_wait_sql, params):
-                _raw_wait[str(row.get("tranche") or "")] = int(row.get("nb") or 0)
-            for lbl in _order:
-                wait_labels.append(lbl)
-                wait_counts.append(_raw_wait.get(lbl, 0))
+                LEFT JOIN accueil_service s ON d.service_demande_id = s.id
+                WHERE 1=1 {and_cond}
+                GROUP BY COALESCE(s.nom, 'Non renseigné') ORDER BY nb DESC LIMIT 8""",
+            params,
+        )
+        motifs = db.execute_query(
+            f"""SELECT COALESCE(m.nom, 'Non renseigné') AS motif, COUNT(*) AS nb
+                FROM accueil_demandeaccueil d
+                LEFT JOIN accueil_motif m ON d.motif_id = m.id
+                WHERE 1=1 {and_cond}
+                GROUP BY COALESCE(m.nom, 'Non renseigné') ORDER BY nb DESC LIMIT 8""",
+            params,
+        )
 
-            # Temps d'attente moyen (en minutes)
-            _avg_rows = db.execute_query(
-                f"""SELECT AVG(
-                        {_WAIT_MIN}
-                    ) AS avg_min
-                    FROM accueil_demandeaccueil d
-                    WHERE temps_attente IS NOT NULL AND temps_attente != '' {and_cond}""",
-                params,
-            )
-            if _avg_rows:
-                avg_wait_min = float(_avg_rows[0].get("avg_min") or 0.0)
+        # Moyenne de visites par jour ouvré (strftime('%w'): 0=Dim … 6=Sam)
+        dow_raw: dict[str, float] = {}
+        for row in db.execute_query(
+            f"""SELECT
+                    strftime('%w', date(COALESCE(d.date, d.created_at))) AS dow,
+                    CAST(COUNT(*) AS REAL)
+                      / COUNT(DISTINCT date(COALESCE(d.date, d.created_at)))
+                      AS avg_day
+                FROM accueil_demandeaccueil d
+                WHERE 1=1 {and_cond}
+                GROUP BY dow""",
+            params,
+        ):
+            dow_raw[str(row.get("dow") or "")] = float(row.get("avg_day") or 0.0)
+        dows = [d for d in _DOW_FR if d in dow_raw]
 
-            # Satisfaction : distribution notes 1–5 + moyenne
-            for row in db.execute_query(
-                f"""SELECT satisfaction, COUNT(*) AS nb
-                    FROM accueil_demandeaccueil d
-                    WHERE satisfaction IS NOT NULL {and_cond}
-                    GROUP BY satisfaction ORDER BY satisfaction""",
-                params,
-            ):
-                note = int(row.get("satisfaction") or 0)
-                nb   = int(row.get("nb") or 0)
-                if 1 <= note <= 5:
-                    sat_counts[note - 1] = nb
-                    sat_total += nb
-
-            _sat_avg_rows = db.execute_query(
-                f"""SELECT AVG(CAST(satisfaction AS REAL)) AS avg_sat
-                    FROM accueil_demandeaccueil d
-                    WHERE satisfaction IS NOT NULL {and_cond}""",
-                params,
-            )
-            if _sat_avg_rows:
-                sat_avg = float(_sat_avg_rows[0].get("avg_sat") or 0.0)
-
-            # Moyenne de visites par jour de semaine
-            # strftime('%w') : 0=Dim, 1=Lun, 2=Mar, 3=Mer, 4=Jeu, 5=Ven, 6=Sam
-            _DOW_FR = {"1": "Lun", "2": "Mar", "3": "Mer", "4": "Jeu", "5": "Ven"}
-            _DOW_ORDER = ["1", "2", "3", "4", "5"]  # Lun→Ven uniquement
-            _dow_raw: dict[str, float] = {}
-            for row in db.execute_query(
-                f"""SELECT
-                        strftime('%w', date(COALESCE(d.date, d.created_at))) AS dow,
-                        CAST(COUNT(*) AS REAL)
-                          / COUNT(DISTINCT date(COALESCE(d.date, d.created_at)))
-                          AS avg_day
-                    FROM accueil_demandeaccueil d
-                    WHERE 1=1 {and_cond}
-                    GROUP BY dow""",
-                params,
-            ):
-                _dow_raw[str(row.get("dow") or "")] = float(row.get("avg_day") or 0.0)
-            for _d in _DOW_ORDER:
-                if _d in _dow_raw:
-                    dow_labels.append(_DOW_FR[_d])
-                    dow_avgs.append(round(_dow_raw[_d], 1))
-
-            # Top usagers les plus fréquents
-            # Clé d'identification : numero_cnps si disponible, sinon nom+prenom
+        # Top usagers; clé d'identification: numero_cnps si disponible, sinon nom+prenom
+        top_users = [
+            {
+                "nom":            str(row.get("nom") or ""),
+                "prenom":         str(row.get("prenom") or "").title(),
+                "cnps":           str(row.get("cnps") or ""),
+                "contact":        str(row.get("contact") or ""),
+                "nb_visites":     int(row.get("nb_visites") or 0),
+                "derniere_visite": str(row.get("derniere_visite") or ""),
+            }
             for row in db.execute_query(
                 f"""SELECT
                         UPPER(TRIM(nom))                          AS nom,
@@ -284,40 +285,28 @@ class _DashboardWorker(QObject):
                         )
                     ORDER BY nb_visites DESC""",
                 params,
-            ):
-                top_users.append({
-                    "nom":            str(row.get("nom") or ""),
-                    "prenom":         str(row.get("prenom") or "").title(),
-                    "cnps":           str(row.get("cnps") or ""),
-                    "contact":        str(row.get("contact") or ""),
-                    "nb_visites":     int(row.get("nb_visites") or 0),
-                    "derniere_visite": str(row.get("derniere_visite") or ""),
-                })
+            )
+        ]
 
-            self.finished.emit({
-                "total_demandes":   total_demandes,
-                "total_traite":     total_traite,
-                "total_attente":    total_attente,
-                "total_non_traite": total_non_traite,
-                "services_names":   services_names,
-                "services_counts":  services_counts,
-                "motifs_names":     motifs_names,
-                "motifs_counts":    motifs_counts,
-                "wait_labels":      wait_labels,
-                "wait_counts":      wait_counts,
-                "avg_wait_min":     avg_wait_min,
-                "sat_counts":       sat_counts,
-                "sat_avg":          sat_avg,
-                "sat_total":        sat_total,
-                "top_users":        top_users,
-                "dow_labels":       dow_labels,
-                "dow_avgs":         dow_avgs,
-            })
-
-        except Exception as exc:
-            import traceback
-            traceback.print_exc()
-            self.failed.emit(str(exc))
+        return {
+            "total_demandes":   total_demandes,
+            "total_traite":     total_traite,
+            "total_attente":    total_attente,
+            "total_non_traite": total_demandes - total_traite - total_attente,
+            "services_names":   [str(r.get("service") or "") for r in services],
+            "services_counts":  [int(r.get("nb") or 0) for r in services],
+            "motifs_names":     [str(r.get("motif") or "") for r in motifs],
+            "motifs_counts":    [int(r.get("nb") or 0) for r in motifs],
+            "wait_labels":      list(_WAIT_ORDER),
+            "wait_counts":      wait_counts,
+            "avg_wait_min":     float(g.get("avg_w") or 0.0),
+            "sat_counts":       sat_counts,
+            "sat_avg":          float(g.get("avg_sat") or 0.0),
+            "sat_total":        sum(sat_counts),
+            "top_users":        top_users,
+            "dow_labels":       [_DOW_FR[d] for d in dows],
+            "dow_avgs":         [round(dow_raw[d], 1) for d in dows],
+        }
 
 
 # ── Fiche détaillée usager ────────────────────────────────────────────────────
@@ -1535,6 +1524,10 @@ class _ChartHandler:
         self._refreshing: bool = False          # verrou anti double-refresh
         self._lbl_sync: QLabel | None = None    # indicateur "⟳ HH:MM" dans la barre filtre
         self._pulse_timer: QTimer | None = None
+        self._pulse_on: bool = False
+        self._last_token: tuple | None = None   # empreinte de la base au dernier chargement
+        self._rerun: bool = False               # un changement de filtre est arrivé pendant un chargement
+        self._closed: bool = False
 
     def refresh(self, *, silent: bool = False) -> None:
         """Déclenche un rechargement des données.
@@ -1543,8 +1536,15 @@ class _ChartHandler:
         silent=True  (appels auto-timer)              : garde les graphiques existants,
                      met à jour discrètement sans clignotement.
         """
+        if self._closed:
+            return
         if self._refreshing:
-            return   # un refresh est déjà en cours, on ignore
+            # Un filtre modifié pendant un chargement doit être pris en compte ensuite
+            self._rerun = self._rerun or not silent
+            return
+        if self._filter_date_from > self._filter_date_to:
+            self._set_sync_state("range")
+            return
         self._refreshing = True
         self._bg_retry = 0
 
@@ -1572,41 +1572,79 @@ class _ChartHandler:
             self._lbl_sync.setStyleSheet(
                 f"color:{_TXT3}; font-size:10px; font-style:italic; background:transparent; border:none;"
             )
-            # Pulse discret : clignotement léger via opacité
-            self._pulse_timer = QTimer()
-            self._pulse_timer.setInterval(600)
-            self._pulse_timer.timeout.connect(self._pulse_sync)
+            # Pulse discret: alternance de couleur (QSS n'a pas de propriété `opacity`)
+            if self._pulse_timer is None:
+                self._pulse_timer = QTimer()
+                self._pulse_timer.setInterval(600)
+                self._pulse_timer.timeout.connect(self._pulse_sync)
             self._pulse_timer.start()
         elif state == "ok":
-            if self._pulse_timer:
-                self._pulse_timer.stop()
-                self._pulse_timer = None
+            self._stop_pulse()
             self._lbl_sync.setText(f"  ✓ {now}")
             self._lbl_sync.setStyleSheet(
                 f"color:#22c55e; font-size:10px; font-weight:600; background:transparent; border:none;"
             )
             # Revient à gris après 4s
-            QTimer.singleShot(4000, lambda: self._lbl_sync.setStyleSheet(
-                f"color:{_TXT3}; font-size:10px; background:transparent; border:none;"
-            ) if self._lbl_sync else None)
+            QTimer.singleShot(4000, self._griser_sync)
+        elif state == "range":
+            self._stop_pulse()
+            self._lbl_sync.setText("  ⚠ La date de début doit précéder la date de fin")
+            self._lbl_sync.setStyleSheet(
+                "color:#f59e0b; font-size:10px; font-weight:600; background:transparent; border:none;"
+            )
         elif state == "error":
-            if self._pulse_timer:
-                self._pulse_timer.stop()
-                self._pulse_timer = None
+            self._stop_pulse()
             self._lbl_sync.setText(f"  ⚠ erreur {now}")
             self._lbl_sync.setStyleSheet(
                 "color:#f87171; font-size:10px; background:transparent; border:none;"
             )
 
+    def _stop_pulse(self) -> None:
+        """Arrête le clignotement (le timer est conservé et réutilisé)."""
+        if self._pulse_timer is not None:
+            self._pulse_timer.stop()
+
+    def _griser_sync(self) -> None:
+        """Remet l'indicateur en gris quelques secondes après un succès."""
+        if self._closed or self._lbl_sync is None or "22c55e" not in self._lbl_sync.styleSheet():
+            return
+        try:
+            self._lbl_sync.setStyleSheet(
+                f"color:{_TXT3}; font-size:10px; background:transparent; border:none;"
+            )
+        except RuntimeError:   # label détruit par une reconstruction de la barre
+            self._lbl_sync = None
+
     def _pulse_sync(self) -> None:
-        """Alterne l'opacité du label pour simuler un clignotement discret."""
+        """Alterne deux couleurs du label pour un clignotement discret."""
         if self._lbl_sync is None:
             return
-        current = self._lbl_sync.styleSheet()
-        if "opacity:0.3" in current:
-            self._lbl_sync.setStyleSheet(current.replace("opacity:0.3", "opacity:1"))
-        else:
-            self._lbl_sync.setStyleSheet(current + " opacity:0.3;")
+        self._pulse_on = not self._pulse_on
+        clr = _TXT2 if self._pulse_on else _TXT3
+        try:
+            self._lbl_sync.setStyleSheet(
+                f"color:{clr}; font-size:10px; font-style:italic; background:transparent; border:none;"
+            )
+        except RuntimeError:
+            self._lbl_sync = None
+            self._stop_pulse()
+
+    def shutdown(self) -> None:
+        """Arrête timers et threads (fermeture de la page)."""
+        self._closed = True
+        if self._pulse_timer is not None:
+            self._pulse_timer.stop()
+            self._pulse_timer.deleteLater()
+            self._pulse_timer = None
+        for attr in ("_thread", "_bg_thread"):
+            thread = getattr(self, attr)
+            try:
+                if thread is not None and thread.isRunning():
+                    thread.quit()
+                    thread.wait(3000)
+            except RuntimeError:
+                pass
+            setattr(self, attr, None)
 
     # ── Chargement initial (avec écran de chargement) ─────────────────────────
 
@@ -1635,9 +1673,10 @@ class _ChartHandler:
             self._thread = None
             return False
 
-    def _on_thread_finished(self) -> None:
-        thread = self._thread
-        self._thread = None
+    def _on_thread_finished(self, thread: QThread) -> None:
+        """Libère CE thread (un signal tardif ne doit pas effacer la référence du thread suivant)."""
+        if self._thread is thread:
+            self._thread = None
         if thread is not None:
             try:
                 thread.deleteLater()
@@ -1661,19 +1700,37 @@ class _ChartHandler:
         self._worker.failed.connect(self._on_data_failed)
         self._worker.finished.connect(thread.quit)
         self._worker.failed.connect(thread.quit)
-        thread.finished.connect(self._on_thread_finished)
+        thread.finished.connect(lambda t=thread: self._on_thread_finished(t))
         thread.start()
+
+    def _relancer_si_demande(self) -> bool:
+        """Si un filtre a changé pendant le chargement, relance proprement (résultat périmé ignoré)."""
+        if not self._rerun:
+            return False
+        self._rerun = False
+        self._refreshing = False
+        self.refresh()
+        return True
 
     def _on_data_ready(self, data: dict) -> None:
         """Callback — données reçues → rebuild complet."""
+        if self._closed:
+            return
+        worker = self._worker
+        if self._relancer_si_demande():
+            return
         self._refreshing = False
+        self._last_token = worker.token if worker is not None else None
         self._last_data = data
         self._build_charts(data)
         self._set_sync_state("ok")
 
     def _on_data_failed(self, error_msg: str) -> None:
         """Callback — erreur chargement initial → affiche le message."""
+        if self._closed or self._relancer_si_demande():
+            return
         self._refreshing = False
+        logger.error("Chargement du dashboard en échec: %s", error_msg)
         self._set_sync_state("error")
         layout = self._layout
         while layout.count():
@@ -1700,43 +1757,63 @@ class _ChartHandler:
 
     def _start_bg_worker(self) -> None:
         """Lance le worker en arrière-plan sans toucher à l'UI."""
-        if self._is_bg_thread_running():
+        if self._closed or self._is_bg_thread_running():
             return   # déjà en cours
 
         thread = QThread()
         self._bg_thread = thread
-        self._bg_worker = _DashboardWorker(self._filter_date_from, self._filter_date_to)
+        self._bg_worker = _DashboardWorker(
+            self._filter_date_from, self._filter_date_to, skip_if_token=self._last_token
+        )
         self._bg_worker.moveToThread(thread)
 
         thread.started.connect(self._bg_worker.run)
         self._bg_worker.finished.connect(self._on_bg_data_ready)
+        self._bg_worker.unchanged.connect(self._on_bg_unchanged)
         self._bg_worker.failed.connect(self._on_bg_data_failed)
         self._bg_worker.finished.connect(thread.quit)
+        self._bg_worker.unchanged.connect(thread.quit)
         self._bg_worker.failed.connect(thread.quit)
-        thread.finished.connect(self._on_bg_thread_finished)
+        thread.finished.connect(lambda t=thread: self._on_bg_thread_finished(t))
         thread.start()
 
-    def _on_bg_thread_finished(self) -> None:
-        thread = self._bg_thread
-        self._bg_thread = None
+    def _on_bg_thread_finished(self, thread: QThread) -> None:
+        """Libère CE thread d'arrière-plan (voir _on_thread_finished)."""
+        if self._bg_thread is thread:
+            self._bg_thread = None
         if thread is not None:
             try:
                 thread.deleteLater()
             except RuntimeError:
                 pass
 
-    def _on_bg_data_ready(self, data: dict) -> None:
-        """Refresh silencieux réussi — on met à jour sans vider les graphiques."""
+    def _on_bg_unchanged(self) -> None:
+        """Refresh silencieux: la base n'a pas bougé, on ne redessine rien."""
+        if self._closed or self._relancer_si_demande():
+            return
         self._refreshing = False
         self._bg_retry = 0
-        self._last_data = data
-        # Rebuild discret : les widgets existants sont remplacés mais sans écran blanc
-        self._animations.clear()
-        self._build_charts(data)
+        self._set_sync_state("ok")
+
+    def _on_bg_data_ready(self, data: dict) -> None:
+        """Refresh silencieux réussi — redessine seulement si les données ont changé."""
+        if self._closed or self._relancer_si_demande():
+            return
+        self._refreshing = False
+        self._bg_retry = 0
+        if self._bg_worker is not None:
+            self._last_token = self._bg_worker.token
+        if data != self._last_data:
+            self._last_data = data
+            self._animations.clear()
+            self._build_charts(data)
         self._set_sync_state("ok")
 
     def _on_bg_data_failed(self, error_msg: str) -> None:
         """Refresh silencieux échoué — retry jusqu'à 3 fois, puis abandon silencieux."""
+        if self._closed or self._relancer_si_demande():
+            return
+        logger.warning("Refresh silencieux du dashboard en échec: %s", error_msg)
         self._bg_retry += 1
         if self._bg_retry < 3:
             # Réessayer dans 15s
@@ -1819,7 +1896,7 @@ class _ChartHandler:
             self._filter_date_from = date.toString("yyyy-MM-dd")
         else:
             self._filter_date_to = date.toString("yyyy-MM-dd")
-        self.refresh()
+        self.refresh()   # signale elle-même une plage inversée
 
     def _on_filter_reset(self) -> None:
         _y = QDate.currentDate().year()
@@ -2283,7 +2360,7 @@ class _ChartHandler:
         ws4 = wb.create_sheet("Données brutes")
         ws4.sheet_view.showGridLines = False
 
-        and_cond = "AND date(COALESCE(d.date, d.created_at)) BETWEEN ? AND ?"
+        and_cond, params = _filtre_periode(d_from, d_to)
         raw_rows = db.execute_query(
             f"""SELECT d.date, d.nom, d.prenom, d.numero_cnps,
                        s.nom AS service, m.nom AS motif,
@@ -2294,7 +2371,7 @@ class _ChartHandler:
                 LEFT JOIN accueil_motif   m ON d.motif_id = m.id
                 WHERE 1=1 {and_cond}
                 ORDER BY d.date DESC, d.heure_arrivee DESC""",
-            (d_from, d_to),
+            params,
         )
 
         ws4.merge_cells("A1:L1")
@@ -2857,17 +2934,13 @@ class DashboardPage(QMainWindow):
         self._chart_handler = _ChartHandler(self._grid)
         self._chart_handler.add_chart()
 
-        # Rafraîchissement automatique silencieux toutes les 60s
+        # Rafraîchissement automatique silencieux (intervalle de la config)
         self._timer = QTimer(self)
         self._timer.timeout.connect(lambda: self._chart_handler.refresh(silent=True))
-        self._timer.start(60_000)
+        self._timer.start(AppConfig.DASHBOARD_KPI_REFRESH_INTERVAL_MS)
 
     def closeEvent(self, event):
         if hasattr(self, "_timer") and self._timer.isActive():
             self._timer.stop()
-        # Attendre la fin du thread worker si actif
-        handler = getattr(self, "_chart_handler", None)
-        if handler and handler._is_thread_running():
-            handler._thread.quit()
-            handler._thread.wait(2000)
+        self._chart_handler.shutdown()
         super().closeEvent(event)

@@ -1,6 +1,6 @@
 """Accueil page embedding the Show_Data UI — avec rendu de tableau moderne."""
 
-from datetime import datetime, time
+from datetime import date, datetime, time, timedelta
 
 from PyQt6.QtCore import Qt, QTimer, QObject, QThread, pyqtSignal, QRect, QRectF
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QBrush
@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
 
 from config import AppConfig
 from database.connection import db
+from utils import app_logger
 from .Show_Data import Ui_MainWindow
 
 
@@ -597,17 +598,66 @@ class TraitementDialog(QDialog):
 
 # ── Worker async ──────────────────────────────────────────────────────────────
 
+def plage_jour(jour_iso: str) -> tuple:
+    """Renvoie (jour, jour suivant) en chaînes ISO pour `date >= ? AND date < ?`.
+
+    Reste correct si `date` est stockée en 'AAAA-MM-JJ' ou 'AAAA-MM-JJTHH:MM:SS'
+    et permet d'utiliser un index sur `date` (contrairement à DATE(date) = ?).
+    """
+    jour = date.fromisoformat(jour_iso[:10])
+    return jour.isoformat(), (jour + timedelta(days=1)).isoformat()
+
+
+def marquer_traitee(demande_id, valeurs: tuple, role) -> int:
+    """UPDATE du traitement d'une demande; renvoie le nombre de lignes modifiées.
+
+    Pour le rôle 'accueil' la clause WHERE exige statut != 'traite' (atomique): si un autre
+    poste a déjà traité la demande, 0 ligne est modifiée. Admin/manager gardent le droit de modifier.
+    `valeurs` = (heure_reception, satisfaction, commentaire, temps_attente, delai_objectif, updated_at).
+    """
+    garde = " AND COALESCE(statut, '') != 'traite'" if role == "accueil" else ""
+    return db.execute_update(
+        """
+        UPDATE accueil_demandeaccueil
+        SET heure_reception = ?,
+            satisfaction = ?,
+            commentaire_satisfaction = ?,
+            temps_attente = ?,
+            delai_objectif = ?,
+            statut = 'traite',
+            updated_at = ?
+        WHERE id = ?""" + garde,
+        tuple(valeurs) + (demande_id,),
+    )
+
+
 class AccueilDemandesWorker(QObject):
-    """Worker Qt pour charger les demandes du jour hors thread UI."""
+    """Worker Qt pour charger les demandes du jour hors thread UI.
+
+    Si `previous_token` est fourni (rafraîchissement automatique), le jeton de changement
+    est lu d'abord: s'il est identique, la liste n'est pas relue (signal `unchanged`).
+    """
 
     finished = pyqtSignal(list)
+    unchanged = pyqtSignal()
     failed = pyqtSignal(str)
 
-    def __init__(self, today_str):
+    def __init__(self, today_str, previous_token=None):
         super().__init__()
         self.today_str = today_str
+        self.previous_token = previous_token
+        self.token = None
 
     def run(self):
+        try:
+            self.token = db.change_token()
+        except Exception as exc:  # repli: rechargement complet
+            app_logger.warning(f"Lecture du jeton de changement impossible (accueil): {exc}")
+            self.token = None
+        if self.token is not None and self.token == self.previous_token:
+            self.unchanged.emit()
+            return
+        debut, fin = plage_jour(self.today_str)
         query = f"""
         SELECT
             d.id,
@@ -627,12 +677,12 @@ class AccueilDemandesWorker(QObject):
         FROM accueil_demandeaccueil d
         LEFT JOIN accueil_service s ON d.service_demande_id = s.id
         LEFT JOIN accueil_motif m ON d.motif_id = m.id
-        WHERE DATE(d.date) = ?
+        WHERE d.date >= ? AND d.date < ?
         ORDER BY CASE WHEN d.statut = 'en_attente' THEN 0 ELSE 1 END,
              COALESCE(d.created_at, d.updated_at, d.date) DESC
         """
         try:
-            results = db.execute_query(query, (self.today_str,))
+            results = db.execute_query(query, (debut, fin))
             self.finished.emit(results)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -653,6 +703,8 @@ class AccueilPage(QMainWindow):
         self._refresh_pending = False
         self._refresh_context = {"preserve_ui_state": False, "silent": False}
         self._reload_thread = None
+        self._last_token = None
+        self._last_token_day = None
 
         # ── Pagination ──────────────────────────────────────────────────
         self._all_acc_results: list = []
@@ -963,13 +1015,17 @@ class AccueilPage(QMainWindow):
             ctx = dict(self._refresh_context)
             QTimer.singleShot(0, lambda: self.load_demandes(ctx.get("preserve_ui_state", True), ctx.get("silent", True)))
 
-    def _start_reload_worker(self, today_str):
+    def _start_reload_worker(self, today_str, silent=False):
         self._reload_thread = QThread(self)
-        self._reload_worker = AccueilDemandesWorker(today_str)
+        # Auto-refresh: on ne relit la liste que si le jeton a changé (même jour)
+        prev = self._last_token if (silent and self._last_token_day == today_str) else None
+        self._reload_worker = AccueilDemandesWorker(today_str, previous_token=prev)
         self._reload_worker.moveToThread(self._reload_thread)
         self._reload_thread.started.connect(self._reload_worker.run)
         self._reload_worker.finished.connect(self._on_reload_finished)
         self._reload_worker.failed.connect(self._on_reload_failed)
+        self._reload_worker.unchanged.connect(self._on_reload_unchanged)
+        self._reload_worker.unchanged.connect(self._reload_thread.quit)
         self._reload_worker.finished.connect(self._reload_thread.quit)
         self._reload_worker.failed.connect(self._reload_thread.quit)
         self._reload_thread.finished.connect(self._reload_worker.deleteLater)
@@ -1017,9 +1073,19 @@ class AccueilPage(QMainWindow):
 
         self._set_refresh_state("• À jour", "#0a8f2e")
 
+    def _on_reload_unchanged(self):
+        """Rien de nouveau en base: on garde l'affichage actuel."""
+        try:
+            self._set_refresh_state("• À jour", "#0a8f2e")
+        finally:
+            self._finalize_refresh()
+
     def _on_reload_finished(self, results):
         try:
             today_str = datetime.now().date().isoformat()
+            worker = getattr(self, "_reload_worker", None)
+            self._last_token = getattr(worker, "token", None)
+            self._last_token_day = today_str
             self._set_cached_results(today_str, results)
             self._apply_demandes_results(
                 results,
@@ -1031,7 +1097,7 @@ class AccueilPage(QMainWindow):
 
     def _on_reload_failed(self, error_message):
         self._set_refresh_state("• Erreur sync", "#c62828")
-        print(f"Erreur refresh accueil async: {error_message}")
+        app_logger.error(f"Erreur refresh accueil async: {error_message}")
         self._finalize_refresh()
 
     # ── Pagination Accueil ────────────────────────────────────────────────────
@@ -1313,18 +1379,8 @@ class AccueilPage(QMainWindow):
         temps_attente = self._format_wait_time(arrivee_time, reception_time)
         delai_objectif = self._compute_delai_objectif(temps_attente)
 
-        db.execute_update(
-            """
-            UPDATE accueil_demandeaccueil
-            SET heure_reception = ?,
-                satisfaction = ?,
-                commentaire_satisfaction = ?,
-                temps_attente = ?,
-                delai_objectif = ?,
-                statut = 'traite',
-                updated_at = ?
-            WHERE id = ?
-            """,
+        modifiees = marquer_traitee(
+            demande_id,
             (
                 heure_reception,
                 payload["satisfaction"],
@@ -1332,9 +1388,14 @@ class AccueilPage(QMainWindow):
                 temps_attente,
                 delai_objectif,
                 datetime.now().isoformat(),
-                demande_id,
             ),
+            self.current_user_role,
         )
+        if modifiees == 0:
+            QMessageBox.information(
+                self, "Traitement",
+                "Cette demande a déjà été traitée depuis un autre poste. La liste va être actualisée.",
+            )
         self._demandes_cache.clear()
         self.load_demandes()
 
@@ -1363,10 +1424,10 @@ class AccueilPage(QMainWindow):
             return
 
         try:
-            self._start_reload_worker(today_str)
+            self._start_reload_worker(today_str, silent=silent)
         except Exception as e:
             self._set_refresh_state("• Erreur sync", "#c62828")
-            print(f"Erreur lancement refresh accueil: {e}")
+            app_logger.error(f"Erreur lancement refresh accueil: {e}")
             self._finalize_refresh()
 
     # ── Fermeture propre ──────────────────────────────────────────────────────

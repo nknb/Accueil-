@@ -3,7 +3,7 @@
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtWidgets import QDialog, QMessageBox, QApplication
-from PyQt6.QtCore import QTimer, Qt, QFile, QTextStream, QIODevice, QSettings
+from PyQt6.QtCore import QTimer, Qt, QFile, QTextStream, QIODevice, QSettings, QThread, pyqtSignal
 import sys
 import logging
 import secrets
@@ -222,6 +222,22 @@ def log_runtime_db_path(db_path: Path):
 logger = logging.getLogger("CNPS-Accueil.Login")
 
 # ===== PARTIE 3: LOGIQUE DE CONNEXION =====
+class _VerificationThread(QThread):
+    """Exécute la lecture de l'utilisateur et la vérification bcrypt hors du thread UI."""
+
+    termine = pyqtSignal(object, object)  # (résultat, exception éventuelle)
+
+    def __init__(self, fonction, parent=None):
+        super().__init__(parent)
+        self._fonction = fonction
+
+    def run(self):
+        try:
+            self.termine.emit(self._fonction(), None)
+        except Exception as exc:  # renvoyée au thread UI, qui affiche le message
+            self.termine.emit(None, exc)
+
+
 class LoginApp(QDialog):
     """Fenêtre de connexion à l'application CNPS Accueil
     
@@ -246,6 +262,7 @@ class LoginApp(QDialog):
         self.tentatives = 0
         self.max_tentatives = AppConfig.MAX_LOGIN_ATTEMPTS
         self.main_window = None
+        self._verification_en_cours = False  # Entrée dans les deux champs ne passe pas par le bouton désactivé
         self.settings = QSettings("CNPS", "AccueilApp")
         
         self.ui = Ui_Form()
@@ -266,7 +283,7 @@ class LoginApp(QDialog):
             "QPushButton:pressed { background: rgba(185,28,28,255); }"
         )
         self._btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_close.clicked.connect(lambda: sys.exit(0))
+        self._btn_close.clicked.connect(self.quitter)
 
         self.ui.pushButton.clicked.connect(self.se_connecter)
         self.ui.lineEdit.returnPressed.connect(self.se_connecter)
@@ -279,6 +296,11 @@ class LoginApp(QDialog):
         self.message_label.setWordWrap(True)
         self.message_label.setVisible(False)
         
+        # Minuteur appartenant à la fenêtre: s'arrête avec elle (pas d'accès à un QLabel détruit)
+        self._timer_message = QTimer(self)
+        self._timer_message.setSingleShot(True)
+        self._timer_message.timeout.connect(self._cacher_message)
+
         self.tentative_label = QtWidgets.QLabel(self.ui.widget)
         self.tentative_label.setGeometry(QtCore.QRect(295, 340, 190, 30))
         self.tentative_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -354,6 +376,8 @@ class LoginApp(QDialog):
     
     def se_connecter(self):
         """Déclenche la vérification de connexion"""
+        if self._verification_en_cours:
+            return
         if self.tentatives >= self.max_tentatives:
             self.afficher_message("⛔ Compte verrouillé (5 min)", "#dc3545")
             self.ui.pushButton.setEnabled(False)
@@ -367,31 +391,77 @@ class LoginApp(QDialog):
             self.afficher_message("❌ Identifiants requis", "#dc3545")
             return
         
+        self._verification_en_cours = True
         self.ui.pushButton.setEnabled(False)
         self.ui.pushButton.setText("Vérification...")
-        QTimer.singleShot(100, lambda: self.verifier_db(identifiant, mot_de_passe))
-    
+        # bcrypt (coût 13) prend jusqu'à ~1 s: hors du thread UI pour ne pas figer la fenêtre
+        self._verif_thread = _VerificationThread(lambda: self._controle(identifiant, mot_de_passe), self)
+        self._verif_thread.termine.connect(lambda res, err: self._appliquer(identifiant, res, err))
+        self._verif_thread.finished.connect(self._verif_thread.deleteLater)
+        self._verif_thread.start()
+
+    def _cacher_message(self) -> None:
+        """Masque le message temporaire (méthode liée: déconnectée automatiquement à la destruction de la fenêtre)."""
+        self.message_label.setVisible(False)
+
+    def _verif_thread_actif(self) -> bool:
+        """True si le thread de vérification tourne encore (l'objet C++ peut déjà être supprimé)."""
+        try:
+            return self._verif_thread.isRunning()
+        except (AttributeError, RuntimeError):
+            return False
+
+    def attendre_verification(self, delai_ms: int = 5000) -> None:
+        """Attend la fin du contrôle en cours: détruire un QThread actif fait avorter Qt."""
+        if self._verif_thread_actif():
+            self._verif_thread.wait(delai_ms)
+
+    def quitter(self) -> None:
+        """Quitte l'application après avoir laissé finir la vérification en cours."""
+        self.attendre_verification()
+        sys.exit(0)
+
+    def _controle(self, identifiant: str, mot_de_passe: str):
+        """Lit l'utilisateur et vérifie le mot de passe (sans toucher à l'UI; exécutable dans un thread).
+
+        Renvoie (user, verrouille, mot_de_passe_ok).
+        """
+        with closing(self._open_db_connection()) as conn:
+            user = conn.execute("""
+                SELECT id, username, password, email, role, is_superuser, echecs, verrouille_jusqua
+                FROM auth_user
+                WHERE username = ? AND is_active = 1
+            """, (identifiant,)).fetchone()
+        if user and user[7] and user[7] > datetime.now().isoformat():
+            return user, True, False
+        return user, False, bool(user) and _PM.verify_password(mot_de_passe, user[2])
+
     def verifier_db(self, identifiant: str, mot_de_passe: str):
-        """Vérifie les identifiants en base de données
-        
+        """Vérifie les identifiants (version synchrone) puis applique le résultat.
+
         Args:
             identifiant: Le nom d'utilisateur
             mot_de_passe: Le mot de passe
         """
         try:
-            with closing(self._open_db_connection()) as conn:
-                user = conn.execute("""
-                    SELECT id, username, password, email, role, is_superuser, echecs, verrouille_jusqua
-                    FROM auth_user
-                    WHERE username = ? AND is_active = 1
-                """, (identifiant,)).fetchone()
+            resultat, erreur = self._controle(identifiant, mot_de_passe), None
+        except Exception as e:
+            resultat, erreur = None, e
+        self._appliquer(identifiant, resultat, erreur)
 
-            if user and user[7] and user[7] > datetime.now().isoformat():
+    def _appliquer(self, identifiant: str, resultat, erreur):
+        """Applique le résultat de `_controle` (thread UI): messages, verrouillage en base, ouverture."""
+        try:
+            if erreur is not None:
+                raise erreur
+            user, verrouille, mdp_ok = resultat
+
+            if verrouille:
                 self.afficher_message("⛔ Compte verrouillé, réessayez plus tard", "#dc3545")
                 return
 
             if user:
-                if _PM.verify_password(mot_de_passe, user[2]):
+                if mdp_ok:
                     self.utilisateur = {
                         'id': user[0],
                         'username': user[1],
@@ -439,6 +509,7 @@ class LoginApp(QDialog):
                 self.afficher_message(f"❌ Erreur: {str(e)}", "#dc3545")
             logger.error("Erreur base de données à la connexion: %s", e)
         finally:
+            self._verification_en_cours = False
             self.ui.pushButton.setEnabled(True)
             self.ui.pushButton.setText("Connexion")
     
@@ -558,7 +629,7 @@ class LoginApp(QDialog):
             }}
         """)
         self.message_label.setVisible(True)
-        QTimer.singleShot(3000, lambda: self.message_label.setVisible(False))
+        self._timer_message.start(3000)
     
     def deverrouiller(self):
         """Déverrouille le compte après la durée de lockout"""
@@ -578,7 +649,7 @@ class LoginApp(QDialog):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
-            sys.exit(0)
+            self.quitter()
         elif event.key() == Qt.Key.Key_F1:
             self.afficher_aide()
         elif (event.modifiers() == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
@@ -809,4 +880,4 @@ if __name__ == "__main__":
         sys.exit(app.exec())
     else:
         print("👋 Au revoir!")
-        sys.exit(0)
+        login.quitter()

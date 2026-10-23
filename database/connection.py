@@ -1,11 +1,11 @@
 # database/connection.py
 """Gestionnaire de connexion SQLite robuste — multi-postes réseau.
 
-Améliorations vs version précédente :
-- PRAGMAs adaptatifs (WAL local / DELETE sur chemin UNC)
-- Retry automatique sur OperationalError "database is locked" (backoff exponentiel)
-- Toutes les écritures dans BEGIN IMMEDIATE (isolement strict)
-- Détection de perte réseau avec reconnexion gracieuse
+- journal_mode (WAL local / DELETE sur chemin UNC) appliqué UNE fois à l'initialisation
+  (il est persistant dans le fichier); par connexion: busy_timeout, foreign_keys, synchronous
+- Retry automatique sur "database is locked / busy" (backoff exponentiel + gigue)
+- Écritures dans BEGIN IMMEDIATE; lectures simples sans transaction explicite
+- Détection de perte réseau
 """
 
 import sqlite3
@@ -28,10 +28,15 @@ _MAX_RETRIES  = 5           # nombre maximum de tentatives
 _BASE_DELAY   = 0.1         # délai initial en secondes
 _MAX_DELAY    = 3.0         # délai maximum en secondes
 _JITTER       = 0.05        # gigue aléatoire pour éviter les convois
+_TOKEN_BUSY_MS = 2000       # attente max de change_token (thread UI)
+_ERROR_TOKEN  = (-1,)  # jeton renvoyé par change_token si la base est indisponible
+
+
+_RETRY_MESSAGES = ("database is locked", "database is busy", "database table is locked", "unable to open")
 
 
 def _retry_on_lock(fn):
-    """Décorateur : relance fn jusqu'à _MAX_RETRIES fois si la DB est verrouillée."""
+    """Décorateur : relance fn jusqu'à _MAX_RETRIES fois si la DB est verrouillée ou occupée."""
     import functools
 
     @functools.wraps(fn)
@@ -42,12 +47,12 @@ def _retry_on_lock(fn):
                 return fn(*args, **kwargs)
             except sqlite3.OperationalError as exc:
                 msg = str(exc).lower()
-                if "database is locked" in msg or "unable to open" in msg:
+                if any(m in msg for m in _RETRY_MESSAGES):
                     last_exc = exc
                     delay = min(_BASE_DELAY * (2 ** attempt), _MAX_DELAY)
                     delay += random.uniform(0, _JITTER)
                     logger.warning(
-                        "DB locked (tentative %d/%d), retry dans %.2fs — %s",
+                        "DB verrouillée (tentative %d/%d), nouvel essai dans %.2fs — %s",
                         attempt + 1, _MAX_RETRIES, delay, exc,
                     )
                     time.sleep(delay)
@@ -172,6 +177,24 @@ class DatabaseConnection:
         );
         """
 
+        # Compteur de version incrémenté par des déclencheurs à CHAQUE écriture (demandes, services, motifs):
+        # les pages le comparent pour savoir s'il faut recharger. Indépendant de l'horloge des postes.
+        version_sql = """
+        CREATE TABLE IF NOT EXISTS app_meta (
+            cle TEXT PRIMARY KEY,
+            valeur INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT OR IGNORE INTO app_meta (cle, valeur) VALUES ('version', 0);
+        """ + "".join(
+            f"""
+        CREATE TRIGGER IF NOT EXISTS trg_version_{table}_{evt}
+        AFTER {evt.upper()} ON {table}
+        BEGIN UPDATE app_meta SET valeur = valeur + 1 WHERE cle = 'version'; END;
+        """
+            for table in ("accueil_demandeaccueil", "accueil_service", "accueil_motif")
+            for evt in ("insert", "update", "delete")
+        )
+
         seed_sql = """
         INSERT INTO accueil_service (nom, description, actif, couleur)
         SELECT 'Service Général', 'Service par défaut', 1, '#417690'
@@ -185,7 +208,9 @@ class DatabaseConnection:
         try:
             with closing(sqlite3.connect(str(self.db_path), timeout=AppConfig.DB_TIMEOUT)) as conn:
                 self._apply_pragmas(conn)
+                self._init_journal_mode(conn)
                 conn.executescript(schema_sql)
+                conn.executescript(version_sql)
                 conn.executescript(seed_sql)
                 # Bases existantes: ajoute les colonnes de verrouillage si absentes
                 cols = {r[1] for r in conn.execute("PRAGMA table_info(auth_user)")}
@@ -213,6 +238,11 @@ class DatabaseConnection:
             "CREATE INDEX IF NOT EXISTS idx_demande_updated_at ON accueil_demandeaccueil(updated_at)",
             "CREATE INDEX IF NOT EXISTS idx_demande_delai_objectif ON accueil_demandeaccueil(delai_objectif)",
             "CREATE INDEX IF NOT EXISTS idx_demande_date_statut ON accueil_demandeaccueil(date, statut)",
+            # Recherche d'usager (fiche dashboard) et requêtes `DATE(date) = ?` (index d'expression)
+            "CREATE INDEX IF NOT EXISTS idx_demande_numero_cnps ON accueil_demandeaccueil(numero_cnps)",
+            "CREATE INDEX IF NOT EXISTS idx_demande_nom_prenom_norm ON accueil_demandeaccueil(UPPER(TRIM(nom)), UPPER(TRIM(prenom)))",
+            "CREATE INDEX IF NOT EXISTS idx_demande_date_created ON accueil_demandeaccueil(date, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_demande_date_jour ON accueil_demandeaccueil(DATE(date))",
         ]
 
         try:
@@ -229,35 +259,74 @@ class DatabaseConnection:
 
     # ── Application des PRAGMAs ───────────────────────────────────────────────
 
+    _journal_pending = False  # True tant que le journal_mode voulu n'a pas pu être appliqué (base occupée)
+
+    def _init_journal_mode(self, conn: sqlite3.Connection) -> None:
+        """Fixe le journal_mode (WAL local / DELETE réseau) une seule fois: il est persistant dans le fichier.
+
+        Si la base est occupée par un autre poste, on le note et `_connect` réessaiera à la prochaine connexion.
+        """
+        try:
+            conn.execute(f"PRAGMA journal_mode = {self._pragmas['journal_mode']}").fetchone()
+            self._journal_pending = False
+        except sqlite3.Error as exc:
+            self._journal_pending = True
+            logger.warning("journal_mode non appliqué (base occupée ?), nouvel essai à la prochaine connexion: %s", exc)
+
+    def _retenter_journal_mode(self, conn: sqlite3.Connection) -> None:
+        """Nouvel essai sans attente (busy_timeout 0): ne ralentit jamais une requête normale."""
+        try:
+            conn.execute("PRAGMA busy_timeout = 0")
+            self._init_journal_mode(conn)
+        finally:
+            conn.execute(f"PRAGMA busy_timeout = {self._pragmas['busy_timeout_ms']}")
+
     def _apply_pragmas(self, conn: sqlite3.Connection) -> None:
-        """Applique les PRAGMAs adaptés au type de stockage (local / réseau UNC)."""
+        """Applique les PRAGMAs propres à chaque connexion (le journal_mode est persistant: voir _init_journal_mode)."""
         p = self._pragmas
-        conn.execute(f"PRAGMA journal_mode = {p['journal_mode']}")
         conn.execute(f"PRAGMA busy_timeout = {p['busy_timeout_ms']}")
         conn.execute(f"PRAGMA foreign_keys = {p['foreign_keys']}")
         conn.execute(f"PRAGMA synchronous = {p['synchronous']}")
 
     # ── Gestionnaire de connexion ─────────────────────────────────────────────
 
+    def _connect(self, busy_ms: Optional[int] = None) -> sqlite3.Connection:
+        """Ouvre une connexion en autocommit (transactions gérées à la main) avec les PRAGMAs par connexion."""
+        self._assert_network()
+        timeout = AppConfig.DB_TIMEOUT if busy_ms is None else busy_ms / 1000
+        conn = sqlite3.connect(
+            str(self.db_path),
+            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+            timeout=timeout,
+            isolation_level=None,
+        )
+        try:
+            conn.row_factory = sqlite3.Row
+            # LIKE/lower() de SQLite ne gèrent la casse que sur l'ASCII: « É » ne serait pas trouvé par « é »
+            conn.create_function("PYLOWER", 1, lambda v: v.lower() if isinstance(v, str) else v, deterministic=True)
+            self._apply_pragmas(conn)
+            if self._journal_pending:
+                self._retenter_journal_mode(conn)
+            if busy_ms is not None:
+                conn.execute(f"PRAGMA busy_timeout = {int(busy_ms)}")
+        except Exception:
+            conn.close()
+            raise
+        return conn
+
     @contextmanager
     def get_connection(self, write: bool = False):
         """Fournit une connexion avec gestion de contexte.
 
         Args:
-            write: Si True, ouvre une transaction BEGIN IMMEDIATE (verrou exclusif
+            write: Si True, ouvre une transaction BEGIN IMMEDIATE (verrou d'écriture
                    dès l'ouverture, évite les deadlocks en écriture multi-postes).
+                   Sinon BEGIN DEFERRED: snapshot cohérent pour plusieurs SELECT
+                   successifs (pour une seule lecture, préférer execute_query).
         """
-        self._assert_network()
         conn = None
         try:
-            conn = sqlite3.connect(
-                str(self.db_path),
-                detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-                timeout=AppConfig.DB_TIMEOUT,
-                isolation_level=None,   # autocommit — on gère les transactions manuellement
-            )
-            conn.row_factory = sqlite3.Row
-            self._apply_pragmas(conn)
+            conn = self._connect()
 
             if write:
                 conn.execute("BEGIN IMMEDIATE")
@@ -282,10 +351,15 @@ class DatabaseConnection:
 
     @_retry_on_lock
     def execute_query(self, query: str, params: tuple = ()) -> List[Dict]:
-        """Exécute une requête SELECT et retourne les résultats."""
-        with self.get_connection(write=False) as conn:
-            cursor = conn.execute(query, params)
-            return [dict(row) for row in cursor.fetchall()]
+        """Exécute une requête SELECT et retourne les résultats.
+
+        Un SELECT seul est déjà cohérent (snapshot implicite): pas de BEGIN/COMMIT.
+        """
+        return self._read(query, params)
+
+    def _read(self, query: str, params: tuple = (), busy_ms: Optional[int] = None) -> List[Dict]:
+        with closing(self._connect(busy_ms)) as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
 
     @_retry_on_lock
     def execute_insert(self, query: str, params: tuple = ()) -> int:
@@ -307,6 +381,26 @@ class DatabaseConnection:
         with self.get_connection(write=True) as conn:
             cursor = conn.executemany(query, params_list)
             return cursor.rowcount
+
+    def change_token(self) -> tuple:
+        """Empreinte légère des données: change dès qu'une demande, un service ou un motif est écrit.
+
+        Lecture d'une seule ligne (compteur `app_meta.version` tenu par des déclencheurs SQL): coût constant
+        quelle que soit la taille de la base, et indépendant de l'horloge de chaque poste. Les pages la
+        comparent à la précédente pour ne recharger (et redessiner) que s'il y a du nouveau, au lieu de
+        relire toutes les lignes toutes les quelques secondes depuis chaque poste.
+
+        Robustesse (appelée depuis le thread UI, ne lève jamais): si la table est absente, la base
+        verrouillée (attente max 2 s, sans retry) ou inaccessible, renvoie le jeton d'erreur constant
+        ``(-1,)``. Les pages ne rechargent alors qu'une fois (jeton différent du précédent),
+        puis restent stables jusqu'au retour de la base.
+        """
+        try:
+            rows = self._read("SELECT valeur FROM app_meta WHERE cle = 'version'", busy_ms=_TOKEN_BUSY_MS)
+        except (sqlite3.Error, OSError, RuntimeError) as exc:
+            logger.warning("change_token indisponible: %s", exc)
+            return _ERROR_TOKEN
+        return (rows[0]["valeur"],) if rows else _ERROR_TOKEN
 
     def table_exists(self, table_name: str) -> bool:
         """Vérifie si une table existe."""

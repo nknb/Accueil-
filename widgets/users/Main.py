@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import closing
 import sqlite3 as _sqlite3
 from datetime import datetime
@@ -40,6 +41,15 @@ from PyQt6.QtWidgets import (
 )
 
 from database.connection import db
+
+_LOG = logging.getLogger(__name__)
+
+# Condition SQL atomique: l'opération ne touche pas le dernier administrateur actif
+# (vérifiée dans la même transaction que l'écriture, donc sûre face à un autre poste).
+_GARDE_DERNIER_ADMIN = (
+    "(role != 'admin' OR is_active = 0 OR"
+    " (SELECT COUNT(*) FROM auth_user WHERE role = 'admin' AND is_active = 1) > 1)"
+)
 
 
 # ── Styles partagés ───────────────────────────────────────────────────────────
@@ -341,6 +351,7 @@ class _UsersTab(QWidget):
             )
             self._users = list(rows)
         except Exception as exc:
+            _LOG.exception("Chargement des utilisateurs impossible")
             QMessageBox.critical(self, "Erreur base de donn\u00e9es",
                                  f"Impossible de charger les utilisateurs :\n{exc}")
 
@@ -436,10 +447,28 @@ class _UsersTab(QWidget):
                 " VALUES (?, ?, ?, ?, 1, ?, ?, ?)",
                 (username, _hash_password(password), email, role, is_admin, is_admin, datetime.now().isoformat()),
             )
+        except _sqlite3.IntegrityError:
+            QMessageBox.warning(self, "Utilisateur", "Cet identifiant est d\u00e9j\u00e0 utilis\u00e9.")
+            self._refresh_table()
+            return
         except Exception as exc:
+            _LOG.exception("Ajout d'utilisateur impossible")
             QMessageBox.critical(self, "Utilisateur", f"Impossible d'ajouter :\n{exc}")
             return
         self._refresh_table()
+
+    def _diagnostic_echec(self, uid, garde_admin: bool = False) -> str:
+        """Explique pourquoi une écriture conditionnelle n'a touché aucune ligne."""
+        try:
+            rows = db.execute_query("SELECT id FROM auth_user WHERE id = ?", (uid,))
+        except Exception:
+            _LOG.exception("Diagnostic d'\u00e9criture impossible")
+            return "L'op\u00e9ration n'a pas pu \u00eatre v\u00e9rifi\u00e9e."
+        if not rows:
+            return "Cet utilisateur a \u00e9t\u00e9 supprim\u00e9 depuis un autre poste."
+        if garde_admin and not retire_admin_autorise(uid):
+            return "Impossible de retirer le dernier administrateur."
+        return "Cet utilisateur a \u00e9t\u00e9 modifi\u00e9 depuis un autre poste. R\u00e9essayez."
 
     def _on_edit(self) -> None:
         uid = self._selected_user_id()
@@ -451,16 +480,17 @@ class _UsersTab(QWidget):
                 "SELECT username, email, role FROM auth_user WHERE id = ?", (uid,)
             )
         except Exception as exc:
+            _LOG.exception("Lecture d'utilisateur impossible")
             QMessageBox.critical(self, "Utilisateur", f"Impossible de lire :\n{exc}")
             return
         if not rows:
             QMessageBox.warning(self, "Modification", "L'utilisateur n'existe plus.")
+            self._refresh_table()
             return
         row = rows[0]
+        lu = (str(row.get("username") or ""), str(row.get("email") or ""), str(row.get("role") or "accueil"))
         dialog = UserFormDialog(
-            self, username=str(row.get("username") or ""),
-            email=str(row.get("email") or ""),
-            role=str(row.get("role") or "accueil"), with_password=False,
+            self, username=lu[0], email=lu[1], role=lu[2], with_password=False,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -472,22 +502,30 @@ class _UsersTab(QWidget):
 
         is_admin = 1 if new_role == "admin" else 0
         if not is_admin and not retire_admin_autorise(uid):
-            QMessageBox.warning(self, "Modification", "Impossible de rétrograder le dernier administrateur.")
+            QMessageBox.warning(self, "Modification", "Impossible de r\u00e9trograder le dernier administrateur.")
             return
+        # Contr\u00f4le optimiste: la ligne doit \u00eatre telle qu'on l'a lue (COALESCE: e-mail NULL ou vide)
+        sets = "username=?, email=?, role=?, is_superuser=?, is_staff=?"
+        vals: list = [new_username, new_email, new_role, is_admin, is_admin]
+        if new_password:
+            sets += ", password=?"
+            vals.append(_hash_password(new_password))
+        cond = "id=? AND username=? AND COALESCE(email,'')=? AND COALESCE(role,'accueil')=?"
+        vals += [uid, *lu]
+        if not is_admin:
+            cond += f" AND {_GARDE_DERNIER_ADMIN}"
         try:
-            if new_password:
-                db.execute_update(
-                    "UPDATE auth_user SET username=?, email=?, role=?, is_superuser=?, is_staff=?, password=? WHERE id=?",
-                    (new_username, new_email, new_role, is_admin, is_admin, _hash_password(new_password), uid),
-                )
-            else:
-                db.execute_update(
-                    "UPDATE auth_user SET username=?, email=?, role=?, is_superuser=?, is_staff=? WHERE id=?",
-                    (new_username, new_email, new_role, is_admin, is_admin, uid),
-                )
-        except Exception as exc:  # ex.: identifiant déjà pris (UNIQUE)
+            n = db.execute_update(f"UPDATE auth_user SET {sets} WHERE {cond}", tuple(vals))
+        except _sqlite3.IntegrityError:
+            QMessageBox.warning(self, "Utilisateur", "Cet identifiant est d\u00e9j\u00e0 utilis\u00e9.")
+            return
+        except Exception as exc:
+            _LOG.exception("Modification d'utilisateur impossible")
             QMessageBox.critical(self, "Utilisateur", f"Impossible de modifier :\n{exc}")
             return
+        if not n:
+            QMessageBox.warning(self, "Modification non enregistr\u00e9e",
+                                self._diagnostic_echec(uid, garde_admin=not is_admin))
         self._refresh_table()
 
     def _on_delete(self) -> None:
@@ -507,10 +545,14 @@ class _UsersTab(QWidget):
             QMessageBox.warning(self, "Suppression", "Impossible de supprimer le dernier administrateur.")
             return
         try:
-            db.execute_update("DELETE FROM auth_user WHERE id = ?", (uid,))
+            n = db.execute_update(
+                f"DELETE FROM auth_user WHERE id = ? AND {_GARDE_DERNIER_ADMIN}", (uid,))
         except Exception as exc:
+            _LOG.exception("Suppression d'utilisateur impossible")
             QMessageBox.critical(self, "Utilisateur", f"Impossible de supprimer :\n{exc}")
             return
+        if not n:
+            QMessageBox.warning(self, "Suppression", self._diagnostic_echec(uid, garde_admin=True))
         self._refresh_table()
 
     def _on_reset_password(self) -> None:
@@ -528,12 +570,17 @@ class _UsersTab(QWidget):
             QMessageBox.warning(self, "Mot de passe", str(exc))
             return
         try:
-            db.execute_update(
+            n = db.execute_update(
                 "UPDATE auth_user SET password = ?, echecs = 0, verrouille_jusqua = NULL WHERE id = ?",
                 (_hash_password(new_password), uid),
             )
         except Exception as exc:
+            _LOG.exception("R\u00e9initialisation du mot de passe impossible")
             QMessageBox.critical(self, "Mot de passe", f"Impossible de mettre \u00e0 jour :\n{exc}")
+            return
+        if not n:
+            QMessageBox.warning(self, "Mot de passe", "Cet utilisateur a \u00e9t\u00e9 supprim\u00e9 depuis un autre poste.")
+            self._refresh_table()
             return
         QMessageBox.information(self, "Mot de passe", "Le mot de passe a \u00e9t\u00e9 mis \u00e0 jour.")
 
@@ -1098,3 +1145,7 @@ class UsersPage(QMainWindow):
         tabs.addTab(self._config_tab, "\u2699\ufe0f  Configuration")
 
         layout.addWidget(tabs)
+
+    def closeEvent(self, event) -> None:
+        self._users_tab._search_timer.stop()
+        super().closeEvent(event)
