@@ -343,10 +343,18 @@ class TraitementDialog(QDialog):
         }
     """
 
+    @staticmethod
+    def _note_valide(valeur) -> int:
+        """Note de satisfaction 0-5; toute valeur illisible (texte, 99…) devient 0/5 au lieu de bloquer le traitement."""
+        try:
+            return max(0, min(5, int(float(valeur or 0))))
+        except (TypeError, ValueError):
+            return 0
+
     def __init__(self, demande: dict, parent=None):
         super().__init__(parent)
         self.demande = demande
-        self._satisfaction = int(demande.get("satisfaction") or 0)
+        self._satisfaction = self._note_valide(demande.get("satisfaction"))
         self._arrivee_dt   = self._parse_arrivee(demande)
         # Heure de réception capturée une seule fois à l'ouverture
         self._heure_reception = datetime.now()
@@ -672,7 +680,7 @@ class AccueilDemandesWorker(QObject):
             self.unchanged.emit()
             return
         debut, fin = plage_jour(self.today_str)
-        query = f"""
+        query = """
         SELECT
             d.id,
             d.nom,
@@ -1344,7 +1352,7 @@ class AccueilPage(QMainWindow):
             QMessageBox.information(self, "Traitement", "Selectionne une ligne d'abord.")
             return
 
-        statut_item = self.ui.tableWidget.item(row, 12)
+        statut_item = self.ui.tableWidget.item(row, _ModernRowDelegate._STATUS_COL)   # colonne Statut (10)
         statut_selectionne = (statut_item.text().strip().lower() if statut_item and statut_item.text() else "")
         if self.current_user_role == "accueil" and statut_selectionne == "traite":
             QMessageBox.information(

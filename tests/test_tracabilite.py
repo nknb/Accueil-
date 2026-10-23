@@ -1,6 +1,6 @@
 """Traçabilité: quel agent a traité chaque demande (agent_accueil_id) et à quel moment (traite_le)."""
 import uuid
-from datetime import date, datetime
+from datetime import date
 
 import pytest
 

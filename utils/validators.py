@@ -6,6 +6,16 @@ from typing import Tuple, Optional
 from .logger import auth_logger
 
 
+# Caractères de contrôle C0 sauf tabulation, saut de ligne et retour chariot: invisibles, souvent collés depuis un
+# document Word/PDF, et refusés par les fichiers Excel (openpyxl lève IllegalCharacterError).
+_CONTROLE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def nettoyer_texte(valeur) -> str:
+    """Texte sans caractères de contrôle invisibles; None -> ''."""
+    return _CONTROLE.sub("", "" if valeur is None else str(valeur))
+
+
 class InputValidator:
     """Classe pour valider les entrées utilisateur"""
     

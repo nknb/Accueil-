@@ -35,6 +35,16 @@ _ERROR_TOKEN  = (-1,)  # jeton renvoyé par change_token si la base est indispon
 _RETRY_MESSAGES = ("database is locked", "database is busy", "database table is locked", "unable to open")
 
 
+def _dossier_absent(args) -> bool:
+    """True si la méthode décorée appartient à une DatabaseConnection dont le dossier de base n'existe pas."""
+    base = args[0] if args else None
+    chemin = getattr(base, "db_path", None)
+    try:
+        return chemin is not None and not Path(chemin).parent.exists()
+    except OSError:
+        return False
+
+
 def _retry_on_lock(fn):
     """Décorateur : relance fn jusqu'à _MAX_RETRIES fois si la DB est verrouillée ou occupée."""
     import functools
@@ -48,6 +58,8 @@ def _retry_on_lock(fn):
             except sqlite3.OperationalError as exc:
                 msg = str(exc).lower()
                 if any(m in msg for m in _RETRY_MESSAGES):
+                    if _dossier_absent(args):
+                        raise   # réessayer ne fera pas apparaître un dossier qui n'existe pas
                     last_exc = exc
                     delay = min(_BASE_DELAY * (2 ** attempt), _MAX_DELAY)
                     delay += random.uniform(0, _JITTER)

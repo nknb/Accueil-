@@ -687,13 +687,18 @@ class _MotifServiceTab(QWidget):
 
     _TABLES_AUTORISEES = frozenset({"accueil_motif", "accueil_service"})
 
+    def _table_autorisee(self) -> str:
+        """Nom de table sûr à insérer dans le SQL: uniquement motifs ou services (pas d'assert: ignoré par python -O)."""
+        if self._current_table not in self._TABLES_AUTORISEES:
+            raise ValueError(f"Table non autorisée: {self._current_table!r}")
+        return self._current_table
+
     def _load_data(self) -> None:
-        # Le nom de table est inséré dans le SQL: on n'accepte que ces deux tables
-        assert self._current_table in self._TABLES_AUTORISEES, self._current_table
         try:
-            cols_info = db.execute_query(f"PRAGMA table_info({self._current_table})")
+            table = self._table_autorisee()
+            cols_info = db.execute_query(f"PRAGMA table_info({table})")
             self._columns = [c.get("name") for c in cols_info]
-            self._records = db.execute_query(f"SELECT * FROM {self._current_table} ORDER BY id DESC")
+            self._records = db.execute_query(f"SELECT * FROM {table} ORDER BY id DESC")
             self._display()
         except Exception as exc:
             QMessageBox.critical(self, "Erreur", f"Chargement impossible : {exc}")
@@ -802,7 +807,7 @@ class _MotifServiceTab(QWidget):
         if reply != QMessageBox.StandardButton.Yes:
             return
         try:
-            db.execute_update(f"DELETE FROM {self._current_table} WHERE id = ?", (uid,))
+            db.execute_update(f"DELETE FROM {self._table_autorisee()} WHERE id = ?", (uid,))
             self._load_data()
         except Exception as exc:
             QMessageBox.critical(self, "Erreur", f"Suppression impossible : {exc}")

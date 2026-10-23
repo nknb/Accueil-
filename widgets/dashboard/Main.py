@@ -44,6 +44,7 @@ from datetime import date, timedelta
 
 from config import AppConfig
 from database.connection import db
+from utils.validators import nettoyer_texte
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,8 @@ _WAIT_MIN = (
 
 def _texte_cellule(cell, val):
     """Écrit `val`; une chaîne commençant par '=' reste du texte (sinon openpyxl l'écrit comme formule)."""
+    if isinstance(val, str):
+        val = nettoyer_texte(val)   # un caractère de contrôle ferait lever openpyxl et perdre tout l'export
     cell.value = val
     if isinstance(val, str) and val.startswith("="):
         cell.data_type = "s"
@@ -613,7 +616,7 @@ class _UserDetailDialog(QDialog):
             QTabBar::tab:hover {{ color:{_TXT1}; }}
         """)
         tabs.addTab(self._build_tab_overview(stats),
-                    f"📊  Vue d'ensemble")
+                    "📊  Vue d'ensemble")
         tabs.addTab(self._build_tab_history(stats),
                     f"📅  Historique ({len(stats['visites'])} visites)")
         tabs.addTab(self._build_tab_ia(stats),
@@ -1236,9 +1239,9 @@ class _TopUsersFrame(QFrame):
         # ── En-tête carte ─────────────────────────────────────────────────────
         hdr_card = QFrame()
         hdr_card.setStyleSheet(
-            f"background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-            f"stop:0 #0f172a, stop:0.5 #1e3a5f, stop:1 #0f172a);"
-            f"border-radius:14px 14px 0 0; border:none;"
+            "background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #0f172a, stop:0.5 #1e3a5f, stop:1 #0f172a);"
+            "border-radius:14px 14px 0 0; border:none;"
         )
         hdr_card.setFixedHeight(54)
         hdr_lay = QHBoxLayout(hdr_card)
@@ -1582,7 +1585,7 @@ class _ChartHandler:
             self._stop_pulse()
             self._lbl_sync.setText(f"  ✓ {now}")
             self._lbl_sync.setStyleSheet(
-                f"color:#22c55e; font-size:10px; font-weight:600; background:transparent; border:none;"
+                "color:#22c55e; font-size:10px; font-weight:600; background:transparent; border:none;"
             )
             # Revient à gris après 4s
             QTimer.singleShot(4000, self._griser_sync)
@@ -2103,7 +2106,7 @@ class _ChartHandler:
         for i, (name, cnt) in enumerate(zip(svc_names, svc_counts)):
             row_s += 1
             bg = _white if i % 2 == 0 else _gray
-            ws1.cell(row=row_s, column=1, value=name).font  = _body_font()
+            ws1.cell(row=row_s, column=1, value=nettoyer_texte(name)).font  = _body_font()
             ws1.cell(row=row_s, column=1).fill   = _fill(bg)
             ws1.cell(row=row_s, column=1).border = _thin_border()
             ws1.cell(row=row_s, column=1).alignment = _left()
@@ -2202,7 +2205,7 @@ class _ChartHandler:
             row3 += 1
             bg = _white if i % 2 == 0 else _gray
             pct = f"{cnt / total_motifs * 100:.1f} %"
-            ws3.cell(row=row3, column=1, value=name).font  = _body_font()
+            ws3.cell(row=row3, column=1, value=nettoyer_texte(name)).font  = _body_font()
             ws3.cell(row=row3, column=1).fill   = _fill(bg)
             ws3.cell(row=row3, column=1).border = _thin_border()
             ws3.cell(row=row3, column=1).alignment = _left()
@@ -2599,7 +2602,6 @@ class _ChartHandler:
         layout.addWidget(self._make_filter_bar(), 0, 0, 1, 5)
 
         # LIGNE 1 : 5 cartes KPI (span adapté)
-        taux = int(total_traite / total_demandes * 100) if total_demandes > 0 else 0
         avg_h, avg_m = divmod(int(avg_wait_min), 60)
         avg_wait_str = f"{avg_h}h {avg_m:02d}min" if avg_h else f"{avg_m} min"
         sat_stars = "★" * round(sat_avg) + "☆" * (5 - round(sat_avg)) if sat_avg else "—"

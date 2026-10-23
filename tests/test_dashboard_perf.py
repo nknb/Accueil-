@@ -326,7 +326,7 @@ def test_mesure_avant_apres_20000(capsys):
             t0 = time.perf_counter(); f(); t.append(time.perf_counter() - t0)
         return sorted(t)[2]
     for (x, y) in [(a, b), ("2021-03-01", "2021-03-07")]:
-        avant, apres = med(lambda: _legacy(x, y)), med(lambda: _DashboardWorker(x, y).load())
+        avant, apres = med(lambda x=x, y=y: _legacy(x, y)), med(lambda x=x, y=y: _DashboardWorker(x, y).load())
         with capsys.disabled():
             print(f"\n[perf] 20 000 demandes {x}..{y}: avant={avant*1000:.0f} ms, apres={apres*1000:.0f} ms")
     assert apres < avant * 1.5  # période courte: l'index doit jouer (marge: machine chargée ou lente)

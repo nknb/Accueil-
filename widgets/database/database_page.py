@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (
 from config import AppConfig
 from database.connection import db
 from database.models import DemandeAccueil
+from utils.validators import nettoyer_texte
 
 _LOG = logging.getLogger(__name__)
 
@@ -1175,7 +1176,7 @@ class DatabasePage(QMainWindow):
 
                 for col_idx, key in enumerate(_COL_KEYS, start=1):
                     val  = rec.get(key)
-                    text = "" if val is None else str(val)
+                    text = nettoyer_texte(val)
                     cell = ws.cell(row=row_idx, column=col_idx, value=text)
                     if text.startswith("="):
                         cell.data_type = "s"  # texte saisi par un agent: ne jamais l'évaluer comme formule

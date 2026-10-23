@@ -44,7 +44,7 @@ try:
     print(f"📦 Type de MainWindow: {type(MainWindow)}")
 except Exception as e:
     print(f"❌ Erreur d'importation: {e}")
-    print(f"📁 Traceback complet:")
+    print("📁 Traceback complet:")
     import traceback
     traceback.print_exc()
     MainWindow = None
@@ -396,7 +396,7 @@ class LoginApp(QDialog):
         self.ui.pushButton.setText("Vérification...")
         # bcrypt (coût 13) prend jusqu'à ~1 s: hors du thread UI pour ne pas figer la fenêtre
         self._verif_thread = _VerificationThread(lambda: self._controle(identifiant, mot_de_passe), self)
-        self._verif_thread.termine.connect(lambda res, err: self._appliquer(identifiant, res, err))
+        self._verif_thread.termine.connect(lambda resultat, err: self._appliquer(identifiant, resultat, err))
         self._verif_thread.finished.connect(self._verif_thread.deleteLater)
         self._verif_thread.start()
 
@@ -481,7 +481,7 @@ class LoginApp(QDialog):
                     self.ouvrir_fenetre_principale()
                 else:
                     reste = self._enregistrer_echec(user[0])
-                    self.afficher_message(f"❌ Mot de passe incorrect", "#dc3545")
+                    self.afficher_message("❌ Mot de passe incorrect", "#dc3545")
                     if reste > 0:
                         self.tentative_label.setText(f"⚠️ Tentatives restantes: {reste}")
                         self.tentative_label.setVisible(True)
@@ -490,7 +490,7 @@ class LoginApp(QDialog):
             else:
                 self.tentatives += 1
                 reste = self.max_tentatives - self.tentatives
-                self.afficher_message(f"❌ Utilisateur inconnu", "#dc3545")
+                self.afficher_message("❌ Utilisateur inconnu", "#dc3545")
                 if reste > 0:
                     self.tentative_label.setText(f"⚠️ Tentatives restantes: {reste}")
                     self.tentative_label.setVisible(True)

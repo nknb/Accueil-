@@ -250,3 +250,25 @@ def test_liste_utilisateurs_se_rafraichit_au_retour_sur_l_onglet(qtbot):
     tab.hide()
     tab.show()
     assert tab.table.rowCount() == avant + 1
+
+
+def test_nom_de_table_verifie_meme_en_mode_optimise(qtbot, monkeypatch):
+    """Le nom de table est inséré dans le SQL: la vérification ne doit pas être un assert (supprimé par python -O)."""
+    import pytest
+    from PyQt6.QtWidgets import QMessageBox
+    from widgets.users.Main import _MotifServiceTab
+    erreurs = []
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: erreurs.append(a[2])))
+    onglet = _MotifServiceTab()
+    qtbot.addWidget(onglet)
+    for autorisee in ("accueil_motif", "accueil_service"):
+        onglet._current_table = autorisee
+        assert onglet._table_autorisee() == autorisee
+    for pirate in ("auth_user", "accueil_motif; DROP TABLE auth_user", ""):
+        onglet._current_table = pirate
+        with pytest.raises(ValueError):
+            onglet._table_autorisee()
+    onglet._current_table = "auth_user"
+    onglet._records = []
+    onglet._load_data()                                            # ne doit lire aucune table interdite
+    assert onglet._records == [] and erreurs and "non autorisée" in erreurs[0]

@@ -5,7 +5,6 @@ import sqlite3
 from pathlib import Path
 from unittest import mock
 
-from config import AppConfig
 from database import connection
 from database.connection import db
 

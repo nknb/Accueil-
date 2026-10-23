@@ -1,10 +1,8 @@
 """Sauvegarde de la base (API de sauvegarde en ligne de SQLite) et PRAGMA optimize au démarrage."""
-import re
 import sqlite3
 import threading
 from contextlib import closing
 from datetime import datetime
-from pathlib import Path
 
 import pytest
 

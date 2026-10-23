@@ -29,6 +29,7 @@ from .Show_Data import Ui_MainWindow
 from database.connection import db
 from database.models import DemandeAccueil
 from utils import app_logger
+from utils.validators import nettoyer_texte
 from widgets.accueil.accueil_page import plage_jour
 
 
@@ -987,8 +988,8 @@ class PreAccueilPage(QMainWindow):
     def enregistrer_demande(self):
         """Save demand to database."""
         # Validation
-        nom = self.input_nom.text().strip().upper()
-        prenom = self.input_prenom.text().strip().title()
+        nom = nettoyer_texte(self.input_nom.text()).strip().upper()
+        prenom = nettoyer_texte(self.input_prenom.text()).strip().title()
         service_idx = self.combo_service.currentIndex()
         motif_idx = self.combo_motif.currentIndex()
         
@@ -1012,8 +1013,8 @@ class PreAccueilPage(QMainWindow):
             self.combo_motif.setFocus()
             return
 
-        cnps = self.input_cnps.text().strip() or None
-        contact = self.input_contact.text().strip() or None
+        cnps = nettoyer_texte(self.input_cnps.text()).strip() or None
+        contact = nettoyer_texte(self.input_contact.text()).strip() or None
         erreur = valider_champs(nom, prenom, cnps, contact)
         if erreur:
             QMessageBox.warning(self, "Erreur Validation", erreur)
