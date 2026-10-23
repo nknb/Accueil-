@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMessageBox,
 )
+import logging
 import os
 import platform
 import subprocess
@@ -478,7 +479,7 @@ class _UserDetailDialog(QDialog):
                     dates_parsed.append(
                         datetime.strptime(str(r.get("date") or "")[:10], "%Y-%m-%d").date()
                     )
-                except Exception:
+                except ValueError:  # date mal formée en base: ligne ignorée dans ce calcul
                     pass
 
             premiere_visite = str(min(dates_parsed)) if dates_parsed else "—"
@@ -504,7 +505,7 @@ class _UserDetailDialog(QDialog):
                     jour_cnt[
                         datetime.strptime(str(r.get("date") or "")[:10], "%Y-%m-%d").weekday()
                     ] += 1
-                except Exception:
+                except ValueError:  # date mal formée en base: ligne ignorée dans ce calcul
                     pass
                 h = _heure_arrivee(r.get("heure_arrivee"))
                 if h is not None:
@@ -1850,8 +1851,8 @@ class _ChartHandler:
                 os.startfile(path)
             else:
                 subprocess.run(["open" if platform.system() == "Darwin" else "xdg-open", path], check=False)
-        except Exception:
-            pass
+        except OSError as exc:  # l'export est déjà écrit: on le journalise sans bloquer
+            logging.getLogger("CNPS-Accueil.Dashboard").warning("Ouverture automatique du rapport impossible: %s", exc)
 
         QMessageBox.information(
             self._layout.parentWidget(),
