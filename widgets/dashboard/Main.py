@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
 )
 import os
 import platform
+import subprocess
 
 from database.connection import db
 
@@ -55,6 +56,14 @@ _WAIT_MIN = (
     "(CAST(substr(temps_attente, 1, instr(temps_attente, ':') - 1) AS INT) * 60"
     " + CAST(substr(temps_attente, instr(temps_attente, ':') + 1, 2) AS INT))"
 )
+
+
+def _texte_cellule(cell, val):
+    """Écrit `val`; une chaîne commençant par '=' reste du texte (sinon openpyxl l'écrit comme formule)."""
+    cell.value = val
+    if isinstance(val, str) and val.startswith("="):
+        cell.data_type = "s"
+    return cell
 
 
 def _minutes_attente(t) -> int | None:
@@ -1839,10 +1848,8 @@ class _ChartHandler:
         try:
             if platform.system() == "Windows":
                 os.startfile(path)
-            elif platform.system() == "Darwin":
-                os.system(f'open "{path}"')
             else:
-                os.system(f'xdg-open "{path}"')
+                subprocess.run(["open" if platform.system() == "Darwin" else "xdg-open", path], check=False)
         except Exception:
             pass
 
@@ -1992,8 +1999,11 @@ class _ChartHandler:
                    align=_center(), border=_thin_border())
         ws1.row_dimensions[row_s].height = 18
 
-        svc_names  = data.get("services_names", [])
-        svc_counts = data.get("services_counts", [])
+        # Les requêtes ne gardent que le top 8: le reste est regroupé pour que les totaux soient exacts
+        svc_names  = list(data.get("services_names", []))
+        svc_counts = list(data.get("services_counts", []))
+        if total_demandes > sum(svc_counts):
+            svc_names.append("Autres"); svc_counts.append(total_demandes - sum(svc_counts))
         for i, (name, cnt) in enumerate(zip(svc_names, svc_counts)):
             row_s += 1
             bg = _white if i % 2 == 0 else _gray
@@ -2087,8 +2097,10 @@ class _ChartHandler:
                    font=_hdr_font(size=10, color=_white), fill=_fill(_navy),
                    align=_center(), border=_thin_border())
 
-        motifs_names  = data.get("motifs_names", [])
-        motifs_counts = data.get("motifs_counts", [])
+        motifs_names  = list(data.get("motifs_names", []))
+        motifs_counts = list(data.get("motifs_counts", []))
+        if total_demandes > sum(motifs_counts):
+            motifs_names.append("Autres"); motifs_counts.append(total_demandes - sum(motifs_counts))
         total_motifs  = sum(motifs_counts) or 1
         for i, (name, cnt) in enumerate(zip(motifs_names, motifs_counts)):
             row3 += 1
@@ -2237,7 +2249,7 @@ class _ChartHandler:
                 u["nb_visites"], u["derniere_visite"],
             ]
             for ci, val in enumerate(row_vals, 1):
-                cell = ws_top.cell(row=row_t, column=ci, value=val)
+                cell = _texte_cellule(ws_top.cell(row=row_t, column=ci), val)
                 cell.font   = Font(name="Calibri", size=10,
                                    bold=is_top3,
                                    color=accent if (is_top3 and ci in (1, 6)) else "1E293B")
@@ -2301,7 +2313,7 @@ class _ChartHandler:
                 row_data.get("satisfaction", ""),
             ]
             for col_idx, val in enumerate(vals, 1):
-                cell = ws4.cell(row=r, column=col_idx, value=val)
+                cell = _texte_cellule(ws4.cell(row=r, column=col_idx), val)
                 cell.font      = _body_font(size=9)
                 cell.fill      = _fill(bg)
                 cell.border    = _thin_border()

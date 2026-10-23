@@ -60,3 +60,24 @@ def test_helpers_dashboard_attente_et_heure():
     assert _minutes_attente("") is None and _minutes_attente("abc") is None
     assert _heure_arrivee("2026-10-23T10:50:03.483938") == 10
     assert _heure_arrivee("09:15:00") == 9 and _heure_arrivee(None) is None
+
+
+def test_export_excel_pas_de_formule_et_totaux_complets(tmp_path):
+    import openpyxl
+    from datetime import date
+    from database.models import DemandeAccueil
+    from widgets.dashboard.Main import _ChartHandler
+    db.execute_update("DELETE FROM accueil_demandeaccueil")
+    jour = date(2013, 7, 8)
+    DemandeAccueil(nom="=1+1", prenom="@x", numero_cnps="=SUM(1,2)", date=jour).save()
+    data = {"total_demandes": 12, "motifs_names": ["A"], "motifs_counts": [5],
+            "services_names": ["S"], "services_counts": [5]}  # 7 demandes hors top
+    out = tmp_path / "r.xlsx"
+    _ChartHandler._write_excel(None, str(out), data, "2013-07-08", "2013-07-08")
+    wb = openpyxl.load_workbook(out)
+    brut = wb["Données brutes"]
+    assert all(c.data_type != "f" for row in brut.iter_rows() for c in row)
+    assert brut["B3"].value == "=1+1"            # texte conservé, pas évalué
+    mot = [[c.value for c in r] for r in wb["Motifs"].iter_rows(min_row=4)]
+    assert ["Autres", 7, "58.3 %"] in mot        # 7/12
+    assert mot[-1][1] == 12                      # TOTAL = total des demandes

@@ -1110,6 +1110,8 @@ class DatabasePage(QMainWindow):
                     val  = rec.get(key)
                     text = "" if val is None else str(val)
                     cell = ws.cell(row=row_idx, column=col_idx, value=text)
+                    if text.startswith("="):
+                        cell.data_type = "s"  # texte saisi par un agent: ne jamais l'évaluer comme formule
                     cell.alignment = Alignment(vertical="center")
                     cell.border = thin_border
 
